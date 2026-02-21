@@ -1,0 +1,54 @@
+{
+  "ticker": "WMT",
+  "company_name": "Walmart Inc.",
+  "sector": "retail",
+  "scored_at": "2026-02-18T22:45:24.768002+00:00",
+  "org_air_score": 60.03,
+  "org_air_ci": {
+    "lower": 52.97,
+    "upper": 67.09,
+    "sem": 3.6029,
+    "reliability": 0.9423
+  },
+  "vr_score": 67.35,
+  "vr_ci": {
+    "lower": 60.29,
+    "upper": 74.41
+  },
+  "hr_score": 57.58,
+  "hr_ci": {
+    "lower": 50.52,
+    "upper": 64.64
+  },
+  "synergy_score": 34.99,
+  "formula": {
+    "alpha": 0.6,
+    "beta": 0.12,
+    "vr_weighted": 40.41,
+    "hr_weighted": 23.032,
+    "weighted_base": 55.83,
+    "synergy_contribution": 4.2
+  },
+  "position_factor": 0.3122,
+  "market_cap_percentile": 0.6,
+  "talent_concentration": 0.2635,
+  "tc_breakdown": "leadership_ratio=0.1429 team_size_factor=0.3642 skill_concentration=0.0 individual_factor=0.0",
+  "dimension_scores": {
+    "data_infrastructure": 78.23,
+    "ai_governance": 77.6,
+    "technology_stack": 79.98,
+    "talent_skills": 52.64,
+    "leadership_vision": 66.88,
+    "use_case_portfolio": 77.51,
+    "culture_change": 55.24
+  },
+  "job_analysis": "total_ai_jobs=7 senior_ai_jobs=1 mid_ai_jobs=4 entry_ai_jobs=0 unique_skills=['bigquery', 'confluence', 'dax', 'java', 'kafka', 'kubernetes', 'ocr', 'power bi', 'prophet', 'pydantic', 'python', 'r', 'scala', 'scikit-learn', 'spark', 'sql', 'tableau', 'tensorflow']",
+  "validation": {
+    "org_air_in_range": true,
+    "org_air_expected": "55.0 - 65.0",
+    "tc_in_range": true,
+    "tc_expected": "0.12 - 0.28",
+    "pf_in_range": true,
+    "pf_expected": "0.1 - 0.5"
+  }
+}

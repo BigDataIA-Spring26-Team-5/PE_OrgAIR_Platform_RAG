@@ -1,0 +1,54 @@
+{
+  "ticker": "DG",
+  "company_name": "Dollar General Corporation",
+  "sector": "retail",
+  "scored_at": "2026-02-18T22:46:23.793747+00:00",
+  "org_air_score": 38.89,
+  "org_air_ci": {
+    "lower": 31.83,
+    "upper": 45.95,
+    "sem": 3.6029,
+    "reliability": 0.9423
+  },
+  "vr_score": 35.24,
+  "vr_ci": {
+    "lower": 28.18,
+    "upper": 42.3
+  },
+  "hr_score": 52.42,
+  "hr_ci": {
+    "lower": 45.36,
+    "upper": 59.48
+  },
+  "synergy_score": 15.3,
+  "formula": {
+    "alpha": 0.6,
+    "beta": 0.12,
+    "vr_weighted": 21.144,
+    "hr_weighted": 20.968,
+    "weighted_base": 37.06,
+    "synergy_contribution": 1.84
+  },
+  "position_factor": -0.3131,
+  "market_cap_percentile": 0.3,
+  "talent_concentration": 0.32,
+  "tc_breakdown": "leadership_ratio=0.5 team_size_factor=1.0 skill_concentration=1.0 individual_factor=0.0",
+  "dimension_scores": {
+    "data_infrastructure": 49.43,
+    "ai_governance": 75.46,
+    "technology_stack": 30.87,
+    "talent_skills": 5.63,
+    "leadership_vision": 54.66,
+    "use_case_portfolio": 43.75,
+    "culture_change": 28.16
+  },
+  "job_analysis": "total_ai_jobs=0 senior_ai_jobs=0 mid_ai_jobs=0 entry_ai_jobs=0 unique_skills=[]",
+  "validation": {
+    "org_air_in_range": true,
+    "org_air_expected": "35.0 - 45.0",
+    "tc_in_range": true,
+    "tc_expected": "0.22 - 0.4",
+    "pf_in_range": true,
+    "pf_expected": "-0.5 - -0.1"
+  }
+}

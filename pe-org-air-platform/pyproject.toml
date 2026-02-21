@@ -1,0 +1,77 @@
+[project]
+name = "pe-org-air-platform"
+version = "0.1.0"
+description = ""
+authors = [
+    {name = "aqeel",email = "ryan.aq@northeastern.edu"}
+]
+requires-python = ">=3.11,<4.0"
+dependencies = [
+    "fastapi (>=0.128.0,<0.129.0)",
+    "uvicorn[standard] (>=0.40.0,<0.41.0)",
+    "pydantic (>=2.12.5,<3.0.0)",
+    "pydantic-settings (>=2.12.0,<3.0.0)",
+    "httpx (>=0.28.1,<0.29.0)",
+    "snowflake-connector-python (>=4.2.0,<5.0.0)",
+    "sqlalchemy (>=2.0.46,<3.0.0)",
+    "alembic (>=1.18.1,<2.0.0)",
+    "boto3 (>=1.42.35,<2.0.0)",
+    "redis (>=7.1.0,<8.0.0)",
+    "structlog (>=25.5.0,<26.0.0)",
+    "sse-starlette (>=3.2.0,<4.0.0)",
+    "websockets (>=16.0,<17.0)",
+    "sec-edgar-downloader (>=5.1.0,<6.0.0)",
+    "beautifulsoup4 (>=4.14.3,<5.0.0)",
+    "lxml (>=6.0.2,<7.0.0)",
+    "pdfplumber (>=0.11.9,<0.12.0)",
+    "pymupdf (>=1.26.7,<2.0.0)",
+    "python-jobspy (>=1.1.0,<2.0.0)",
+    "numpy (>=2.0,<3.0)",
+    "selenium (>=4.40.0,<5.0.0)",
+    "webdriver-manager (>=4.0.2,<5.0.0)",
+    "playwright (>=1.58.0,<2.0.0)",
+    "trustpilot-scraper (>=0.10,<0.11)",
+    "plotly (>=6.5.2,<7.0.0)",
+    "rapidfuzz (>=3.14.3,<4.0.0)"
+]
+
+[tool.poetry]
+package-mode = false
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
+
+[dependency-groups]
+dev = [
+    "pytest (>=9.0.2,<10.0.0)",
+    "pytest-asyncio (>=1.3.0,<2.0.0)",
+    "pytest-cov (>=7.0.0,<8.0.0)",
+    "black (>=26.1.0,<27.0.0)",
+    "ruff (>=0.14.14,<0.15.0)",
+    "mypy (>=1.19.1,<2.0.0)",
+    "hypothesis (>=6.151.2,<7.0.0)"
+]
+[tool.coverage.run]
+source = ["app/scoring"]
+omit = [
+    "app/scoring/__init__.py",
+    "app/scoring/integration_service.py",
+    "app/scoring/hr_calculator.py",
+    "app/scoring/position_factor.py",
+    "app/scoring/talent_concentration.py",
+]
+
+[tool.coverage.report]
+omit = [
+    "app/scripts/*",
+    "app/pipelines/*",
+    "app/repositories/*",
+    "app/services/*",
+    "app/routers/*",
+    "app/database/*",
+    "app/core/*",
+]
+
+[tool.pytest.ini_options]
+addopts = "--junitxml=test_results/test_results.xml --cov-report=html:test_results/coverage_html"

@@ -1,0 +1,54 @@
+{
+  "ticker": "JPM",
+  "company_name": "JPMorgan Chase & Co.",
+  "sector": "financial_services",
+  "scored_at": "2026-02-18T22:44:55.242407+00:00",
+  "org_air_score": 66.8,
+  "org_air_ci": {
+    "lower": 59.74,
+    "upper": 73.86,
+    "sem": 3.6029,
+    "reliability": 0.9423
+  },
+  "vr_score": 67.26,
+  "vr_ci": {
+    "lower": 60.2,
+    "upper": 74.32
+  },
+  "hr_score": 72.36,
+  "hr_ci": {
+    "lower": 65.3,
+    "upper": 79.42
+  },
+  "synergy_score": 48.5,
+  "formula": {
+    "alpha": 0.6,
+    "beta": 0.12,
+    "vr_weighted": 40.356,
+    "hr_weighted": 28.944,
+    "weighted_base": 60.98,
+    "synergy_contribution": 5.82
+  },
+  "position_factor": 0.4271,
+  "market_cap_percentile": 0.85,
+  "talent_concentration": 0.1048,
+  "tc_breakdown": "leadership_ratio=0.0 team_size_factor=0.1923 skill_concentration=0.0 individual_factor=0.0133",
+  "dimension_scores": {
+    "data_infrastructure": 72.23,
+    "ai_governance": 81.37,
+    "technology_stack": 76.04,
+    "talent_skills": 49.72,
+    "leadership_vision": 77.44,
+    "use_case_portfolio": 78.29,
+    "culture_change": 55.92
+  },
+  "job_analysis": "total_ai_jobs=26 senior_ai_jobs=0 mid_ai_jobs=11 entry_ai_jobs=5 unique_skills=['ab testing', 'aws sagemaker', 'bedrock', 'c', 'databricks', 'embedded', 'excel vba', 'hadoop', 'huggingface', 'java', 'keras', 'langchain', 'numpy', 'pandas', 'python', 'pytorch', 'r', 'sagemaker', 'scala', 'scikit-learn', 'scipy', 'snowflake', 'spark', 'sql', 'tableau', 'tensorflow', 'terraform']",
+  "validation": {
+    "org_air_in_range": true,
+    "org_air_expected": "65.0 - 75.0",
+    "tc_in_range": true,
+    "tc_expected": "0.1 - 0.25",
+    "pf_in_range": true,
+    "pf_expected": "0.3 - 0.7"
+  }
+}

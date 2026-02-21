@@ -1,0 +1,58 @@
+{
+  "generated_at": "2026-02-18T22:46:23.889345+00:00",
+  "pipeline": "CS3 Org-AI-R Scoring Engine",
+  "companies": 5,
+  "all_in_range": true,
+  "results": [
+    {
+      "ticker": "NVDA",
+      "org_air_score": 85.26,
+      "vr_score": 81.17,
+      "hr_score": 93.25,
+      "synergy_score": 79.86,
+      "tc": 0.0549,
+      "pf": 0.734,
+      "in_range": true
+    },
+    {
+      "ticker": "JPM",
+      "org_air_score": 66.8,
+      "vr_score": 67.26,
+      "hr_score": 72.36,
+      "synergy_score": 48.5,
+      "tc": 0.1048,
+      "pf": 0.4271,
+      "in_range": true
+    },
+    {
+      "ticker": "WMT",
+      "org_air_score": 60.03,
+      "vr_score": 67.35,
+      "hr_score": 57.58,
+      "synergy_score": 34.99,
+      "tc": 0.2635,
+      "pf": 0.3122,
+      "in_range": true
+    },
+    {
+      "ticker": "GE",
+      "org_air_score": 46.62,
+      "vr_score": 47.98,
+      "hr_score": 52.28,
+      "synergy_score": 24.01,
+      "tc": 0.3148,
+      "pf": 0.0358,
+      "in_range": true
+    },
+    {
+      "ticker": "DG",
+      "org_air_score": 38.89,
+      "vr_score": 35.24,
+      "hr_score": 52.42,
+      "synergy_score": 15.3,
+      "tc": 0.32,
+      "pf": -0.3131,
+      "in_range": true
+    }
+  ]
+}

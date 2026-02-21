@@ -1,0 +1,125 @@
+Property-Based Test Run Report
+Generated : 2026-02-19 20:46:41
+Target    : 500 examples per test  |  Showing top 5 passed examples per test
+===========================================================================
+
+  VRCalculator
+  -----------------------------------------------------------------
+  [PASS] test_vr_always_bounded                            500/500 examples ran
+         Ex.1: tc=0  scores=[ DI=0.0  AG=0.0  TS=0.0  TL=0.0  LV=0.0  UC=0.0  CC=0.0 ]
+         Ex.2: tc=0  scores=[ DI=74.9  AG=0.0  TS=0.0  TL=0.0  LV=0.0  UC=0.0  CC=0.0 ]
+         Ex.3: tc=0.617  scores=[ DI=74.9  AG=84.7  TS=68.5  TL=0.7  LV=0.0  UC=0.4  CC=72.0 ]
+         Ex.4: tc=0  scores=[ DI=0.0  AG=0.0  TS=0.0  TL=0.0  LV=0.0  UC=0.0  CC=0.0 ]
+         Ex.5: tc=0.3063  scores=[ DI=0.0  AG=24.9  TS=1.0  TL=18.5  LV=0.0  UC=0.0  CC=99.3 ]
+  [PASS] test_higher_scores_increase_vr                    500/500 examples ran
+         Ex.1: tc=0  delta=1  scores=[ DI=0.0  AG=0.0  TS=0.0  TL=0.0  LV=0.0  UC=0.0  CC=0.0 ]
+         Ex.2: tc=0  delta=1  scores=[ DI=47.6  AG=0.0  TS=0.0  TL=0.0  LV=0.0  UC=0.0  CC=0.0 ]
+         Ex.3: tc=0.0947  delta=23.69  scores=[ DI=47.6  AG=11.7  TS=0.0  TL=65.9  LV=89.6  UC=56.7  CC=39.5 ]
+         Ex.4: tc=0  delta=1  scores=[ DI=75.1  AG=0.0  TS=0.0  TL=0.0  LV=0.0  UC=0.0  CC=0.0 ]
+         Ex.5: tc=0.0177  delta=39.55  scores=[ DI=75.1  AG=42.3  TS=87.2  TL=39.8  LV=73.6  UC=5.2  CC=21.0 ]
+  [PASS] test_talent_concentration_penalty                 500/500 examples ran
+         Ex.1: low_tc=0  high_tc=0.5  scores=[ DI=0.0  AG=0.0  TS=0.0  TL=0.0  LV=0.0  UC=0.0  CC=0.0 ]
+         Ex.2: low_tc=0  high_tc=0.5  scores=[ DI=51.7  AG=0.0  TS=0.0  TL=0.0  LV=0.0  UC=0.0  CC=0.0 ]
+         Ex.3: low_tc=0.3232  high_tc=0.8197  scores=[ DI=51.7  AG=61.8  TS=0.0  TL=66.8  LV=40.2  UC=44.6  CC=0.0 ]
+         Ex.4: low_tc=0  high_tc=0.5  scores=[ DI=24.0  AG=0.0  TS=0.0  TL=0.0  LV=0.0  UC=0.0  CC=0.0 ]
+         Ex.5: low_tc=0.003  high_tc=0.7058  scores=[ DI=24.0  AG=20.0  TS=86.6  TL=0.2  LV=0.0  UC=0.0  CC=62.8 ]
+  [PASS] test_uniform_dimensions_no_cv_penalty             500/500 examples ran
+         Ex.1: uniform_val=0  tc=0
+         Ex.2: uniform_val=76.15  tc=0
+         Ex.3: uniform_val=76.15  tc=0.9998
+         Ex.4: uniform_val=84.45  tc=0
+         Ex.5: uniform_val=84.45  tc=0.2375
+  [PASS] test_deterministic                                500/500 examples ran
+         Ex.1: tc=0  scores=[ DI=0.0  AG=0.0  TS=0.0  TL=0.0  LV=0.0  UC=0.0  CC=0.0 ]
+         Ex.2: tc=0  scores=[ DI=0.0  AG=0.0  TS=0.0  TL=0.0  LV=0.0  UC=0.0  CC=0.0 ]
+         Ex.3: tc=0.08  scores=[ DI=0.0  AG=80.3  TS=12.9  TL=12.4  LV=91.4  UC=78.4  CC=0.0 ]
+         Ex.4: tc=0  scores=[ DI=5.9  AG=0.0  TS=0.0  TL=0.0  LV=0.0  UC=0.0  CC=0.0 ]
+         Ex.5: tc=0.8  scores=[ DI=5.9  AG=45.0  TS=0.0  TL=1.0  LV=92.1  UC=0.0  CC=96.1 ]
+
+  EvidenceMapper
+  -----------------------------------------------------------------
+  [PASS] test_all_dimensions_returned                      500/500 examples ran
+         Ex.1: n_sources=1  sources=['technology_h']
+         Ex.2: n_sources=1  sources=['glassdoor_re']
+         Ex.3: n_sources=3  sources=['glassdoor_re', 'sec_item_1', 'sec_item_1a']
+         Ex.4: n_sources=1  sources=['glassdoor_re']
+         Ex.5: n_sources=1  sources=['innovation_a']
+  [PASS] test_missing_evidence_defaults_to_50              500/500 examples ran
+         Ex.1: evidence=[]  (empty — fixed)  expected_score=50
+         Ex.2: evidence=[]  (empty — fixed)  expected_score=50
+         Ex.3: evidence=[]  (empty — fixed)  expected_score=50
+         Ex.4: evidence=[]  (empty — fixed)  expected_score=50
+         Ex.5: evidence=[]  (empty — fixed)  expected_score=50
+  [PASS] test_more_evidence_higher_confidence              500/500 examples ran
+         Ex.1: small=['technology']  large=['digital_pr', 'leadership', 'innovation', 'technology', 'sec_item_1']
+         Ex.2: small=['sec_item_1']  large=['digital_pr', 'leadership', 'innovation', 'sec_item_1', 'technology', 'sec_item_1']
+         Ex.3: small=['sec_item_1']  large=['digital_pr', 'leadership', 'innovation', 'sec_item_1', 'technology', 'glassdoor_', 'board_comp']
+         Ex.4: small=['digital_pr']  large=['digital_pr', 'leadership', 'innovation', 'technology', 'sec_item_1']
+         Ex.5: small=['digital_pr', 'technology']  large=['digital_pr', 'leadership', 'innovation', 'sec_item_1', 'technology', 'glassdoor_', 'board_comp', 'sec_item_7', 'sec_item_1']
+
+  SynergyCalculator
+  -----------------------------------------------------------------
+  [PASS] test_synergy_always_bounded                       500/500 examples ran
+         Ex.1: vr=0  hr=0  alignment=0  timing=0.5
+         Ex.2: vr=90  hr=0  alignment=0  timing=0.5
+         Ex.3: vr=90  hr=84.01  alignment=0.1171  timing=0.8933
+         Ex.4: vr=37.4  hr=0  alignment=0  timing=0.5
+         Ex.5: vr=37.4  hr=0  alignment=0.3602  timing=1.134
+  [PASS] test_synergy_zero_when_either_is_zero             500/500 examples ran
+         Ex.1: nonzero=0  alignment=0  timing=0.5
+         Ex.2: nonzero=64.42  alignment=0  timing=0.5
+         Ex.3: nonzero=64.42  alignment=0.4756  timing=1.008
+         Ex.4: nonzero=42.83  alignment=0  timing=0.5
+         Ex.5: nonzero=42.83  alignment=0  timing=1.047
+  [PASS] test_synergy_deterministic                        500/500 examples ran
+         Ex.1: vr=0  hr=0  alignment=0  timing=0.5
+         Ex.2: vr=72.41  hr=0  alignment=0  timing=0.5
+         Ex.3: vr=72.41  hr=97.51  alignment=0.5967  timing=1
+         Ex.4: vr=9.18  hr=0  alignment=0  timing=0.5
+         Ex.5: vr=9.18  hr=0  alignment=0.05  timing=1.334
+
+  ConfidenceCalc
+  -----------------------------------------------------------------
+  [PASS] test_ci_always_valid_range                        500/500 examples ran
+         Ex.1: score=0  n=1  score_type=vr
+         Ex.2: score=53.75  n=1  score_type=vr
+         Ex.3: score=53.75  n=4  score_type=vr
+         Ex.4: score=0  n=1  score_type=vr
+         Ex.5: score=0  n=38  score_type=vr
+  [PASS] test_more_evidence_higher_reliability             500/500 examples ran
+         Ex.1: score=0  score_type=vr  n_small=1  n_large=20
+         Ex.2: score=42.4  score_type=vr  n_small=1  n_large=20
+         Ex.3: score=64.52  score_type=vr  n_small=1  n_large=20
+         Ex.4: score=64.52  score_type=org_air  n_small=1  n_large=20
+         Ex.5: score=62.19  score_type=vr  n_small=1  n_large=20
+  [PASS] test_confidence_deterministic                     500/500 examples ran
+         Ex.1: score=0  n=1  score_type=vr
+         Ex.2: score=86.27  n=1  score_type=vr
+         Ex.3: score=86.27  n=21  score_type=vr
+         Ex.4: score=61.98  n=1  score_type=vr
+         Ex.5: score=61.98  n=9  score_type=org_air
+
+  OrgAIRCalculator
+  -----------------------------------------------------------------
+  [PASS] test_orgair_always_bounded                        500/500 examples ran
+         Ex.1: vr=0  hr=0  synergy=0
+         Ex.2: vr=61.24  hr=0  synergy=0
+         Ex.3: vr=61.24  hr=1  synergy=69.66
+         Ex.4: vr=85.44  hr=0  synergy=0
+         Ex.5: vr=85.44  hr=92.06  synergy=12.36
+  [PASS] test_orgair_monotone_with_vr                      500/500 examples ran
+         Ex.1: vr_low=0  delta=10  hr=0  synergy=0
+         Ex.2: vr_low=24.39  delta=10  hr=0  synergy=0
+         Ex.3: vr_low=24.39  delta=13.2  hr=64.21  synergy=0
+         Ex.4: vr_low=18.02  delta=10  hr=0  synergy=0
+         Ex.5: vr_low=18.02  delta=19.41  hr=90  synergy=98.5
+  [PASS] test_orgair_deterministic                         500/500 examples ran
+         Ex.1: vr=0  hr=0  synergy=0
+         Ex.2: vr=0  hr=0  synergy=0
+         Ex.3: vr=0  hr=1  synergy=0
+         Ex.4: vr=0  hr=0  synergy=0
+         Ex.5: vr=0  hr=4.56  synergy=28.08
+
+===========================================================================
+Result: 17/17 tests completed 500 examples
+

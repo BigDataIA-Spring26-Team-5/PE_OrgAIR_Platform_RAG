@@ -1,0 +1,54 @@
+{
+  "ticker": "NVDA",
+  "company_name": "NVIDIA Corporation",
+  "sector": "technology",
+  "scored_at": "2026-02-18T22:44:26.411983+00:00",
+  "org_air_score": 85.26,
+  "org_air_ci": {
+    "lower": 78.2,
+    "upper": 92.32,
+    "sem": 3.6029,
+    "reliability": 0.9423
+  },
+  "vr_score": 81.17,
+  "vr_ci": {
+    "lower": 74.11,
+    "upper": 88.23
+  },
+  "hr_score": 93.25,
+  "hr_ci": {
+    "lower": 86.19,
+    "upper": 100.0
+  },
+  "synergy_score": 79.86,
+  "formula": {
+    "alpha": 0.6,
+    "beta": 0.12,
+    "vr_weighted": 48.702,
+    "hr_weighted": 37.3,
+    "weighted_base": 75.68,
+    "synergy_contribution": 9.58
+  },
+  "position_factor": 0.734,
+  "market_cap_percentile": 0.95,
+  "talent_concentration": 0.0549,
+  "tc_breakdown": "leadership_ratio=0.055 team_size_factor=0.0949 skill_concentration=0.0 individual_factor=0.0444",
+  "dimension_scores": {
+    "data_infrastructure": 82.32,
+    "ai_governance": 83.4,
+    "technology_stack": 88.1,
+    "talent_skills": 76.19,
+    "leadership_vision": 86.18,
+    "use_case_portfolio": 90.8,
+    "culture_change": 70.68
+  },
+  "job_analysis": "total_ai_jobs=109 senior_ai_jobs=6 mid_ai_jobs=77 entry_ai_jobs=3 unique_skills=['ab testing', 'airflow', 'c', 'confluence', 'cuda', 'dask', 'databricks', 'digital twin', 'docker', 'embedded', 'gazebo', 'go', 'grafana', 'hive', 'infiniband', 'isaac', 'jax', 'kubernetes', 'langchain', 'mpi', 'numpy', 'nvlink', 'omniverse', 'openacc', 'openai', 'openmp', 'pandas', 'polars', 'presto', 'prometheus', 'python', 'pytorch', 'r', 'ray', 'ros', 'rust', 'scala', 'spark', 'sql', 'tableau', 'tensorflow', 'tensorrt', 'terraform', 'triton', 'vllm', 'xgboost']",
+  "validation": {
+    "org_air_in_range": true,
+    "org_air_expected": "85.0 - 95.0",
+    "tc_in_range": true,
+    "tc_expected": "0.05 - 0.2",
+    "pf_in_range": true,
+    "pf_expected": "0.7 - 1.0"
+  }
+}

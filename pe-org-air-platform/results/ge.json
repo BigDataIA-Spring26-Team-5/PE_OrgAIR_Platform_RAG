@@ -1,0 +1,54 @@
+{
+  "ticker": "GE",
+  "company_name": "GE Aerospace",
+  "sector": "manufacturing",
+  "scored_at": "2026-02-18T22:45:54.223344+00:00",
+  "org_air_score": 46.62,
+  "org_air_ci": {
+    "lower": 39.56,
+    "upper": 53.68,
+    "sem": 3.6029,
+    "reliability": 0.9423
+  },
+  "vr_score": 47.98,
+  "vr_ci": {
+    "lower": 40.92,
+    "upper": 55.04
+  },
+  "hr_score": 52.28,
+  "hr_ci": {
+    "lower": 45.22,
+    "upper": 59.34
+  },
+  "synergy_score": 24.01,
+  "formula": {
+    "alpha": 0.6,
+    "beta": 0.12,
+    "vr_weighted": 28.788,
+    "hr_weighted": 20.912,
+    "weighted_base": 43.74,
+    "synergy_contribution": 2.88
+  },
+  "position_factor": 0.0358,
+  "market_cap_percentile": 0.5,
+  "talent_concentration": 0.3148,
+  "tc_breakdown": "leadership_ratio=0.1818 team_size_factor=0.2927 skill_concentration=0.4667 individual_factor=0.0",
+  "dimension_scores": {
+    "data_infrastructure": 60.34,
+    "ai_governance": 69.51,
+    "technology_stack": 46.16,
+    "talent_skills": 29.61,
+    "leadership_vision": 54.86,
+    "use_case_portfolio": 58.83,
+    "culture_change": 42.23
+  },
+  "job_analysis": "total_ai_jobs=11 senior_ai_jobs=2 mid_ai_jobs=1 entry_ai_jobs=2 unique_skills=['c', 'demand forecasting', 'digital twin', 'embedded', 'power bi', 'python', 'scala', 'sql']",
+  "validation": {
+    "org_air_in_range": true,
+    "org_air_expected": "45.0 - 55.0",
+    "tc_in_range": true,
+    "tc_expected": "0.18 - 0.35",
+    "pf_in_range": true,
+    "pf_expected": "-0.2 - 0.2"
+  }
+}
