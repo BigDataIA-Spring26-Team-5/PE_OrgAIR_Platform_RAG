@@ -1,2 +1,1 @@
-# 🏢 PE Org-AI-R Platform : AI Readiness Scoring Engine
----
+# 🏢 PE Org-AI-R Platform : CS4
