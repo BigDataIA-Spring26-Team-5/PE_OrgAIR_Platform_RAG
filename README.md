@@ -1,38 +1,6 @@
 # 🏢 PE Org-AI-R Platform : AI Readiness Scoring Engine
 ---
 
-## 🔗 Links
-
-| Resource | URL |
-|----------|-----|
-| **Streamlit Dashboard** | [pe-orgair-platform-scoring.streamlit.app](https://pe-orgair-platform-scoring.streamlit.app/) |
-| **FastAPI (Render)** | [pe-orgair-platform-scoring-engine.onrender.com](https://pe-orgair-platform-scoring-engine.onrender.com/docs) |
-| **GitHub Repository** | [PE-Org-AIR-Platform Scoring Engine](https://github.com/BigDataIA-Spring26-Team-5/PE_OrgAIR_Platform_Scoring_Engine) |
-| **Video Demonstration** | [SharePoint Link](https://northeastern-my.sharepoint.com/:v:/g/personal/bukka_b_northeastern_edu/IQCZIDTNwhoESLd4c_PTXKyLASysquNoljTZ70LSlPlh1X4?e=3k45Tt&nav=eyJyZWZlcnJhbEluZm8iOnsicmVmZXJyYWxBcHAiOiJTdHJlYW1XZWJBcHAiLCJyZWZlcnJhbFZpZXciOiJTaGFyZURpYWxvZy1MaW5rIiwicmVmZXJyYWxBcHBQbGF0Zm9ybSI6IldlYiIsInJlZmVycmFsTW9kZSI6InZpZXcifX0%3D) |
-
----
-
-## 📑 Table of Contents
-
-1. [Project Overview & Context](#1-project-overview--context)
-2. [Objective & Business Problem](#2-objective--business-problem)
-3. [Architecture](#3-architecture)
-4. [Case Study Progression](#4-case-study-progression)
-5. [The Org-AI-R Formula](#5-the-org-ai-r-formula)
-6. [Scoring Pipeline Flow](#6-scoring-pipeline-flow)
-7. [CS3 Deliverables Checklist](#7-cs3-deliverables-checklist)
-8. [Portfolio Results](#8-portfolio-results)
-9. [API Endpoints & Streamlit Dashboard](#9-api-endpoints--streamlit-dashboard)
-10. [Testing & Coverage](#10-testing--coverage)
-11. [Setup & Installation](#11-setup--installation)
-12. [Project Structure](#12-project-structure)
-13. [Summary & Key Takeaways](#13-summary--key-takeaways)
-14. [Design Decisions & Tradeoffs](#14-design-decisions--tradeoffs)
-15. [Known Limitations](#15-known-limitations)
-16. [Team Member Contributions & AI Usage](#16-team-member-contributions--ai-usage)
-
----
-
 ## 1. Project Overview & Context
 
 The **PE Org-AI-R Platform** simulates a Private Equity due-diligence tool that measures how ready a company is to adopt and benefit from AI. It answers the question PE partners care about most: *"Is this company actually investing in AI, or just talking about it?"*
