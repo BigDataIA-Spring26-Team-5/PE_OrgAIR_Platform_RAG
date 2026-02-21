@@ -1,12 +1,4 @@
 # 🏢 PE Org-AI-R Platform : AI Readiness Scoring Engine
-
-> **Case Study 3: From Evidence to Scores**
-> Big Data and Intelligent Analytics — Spring 2026 | Team 5
-
-AI readiness scoring platform that evaluates organizational AI maturity across a portfolio of 5 public companies. The platform ingests SEC filings, scrapes external signals, and computes a composite **Org-AI-R score** (0–100) using a multi-stage pipeline with property-based testing and confidence intervals.
-
-**All 5 companies score within their CS3 Table 5 expected ranges. ✅**
-
 ---
 
 ## 🔗 Links
