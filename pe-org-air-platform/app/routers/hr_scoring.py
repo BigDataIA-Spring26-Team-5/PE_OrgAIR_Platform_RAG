@@ -6,9 +6,7 @@ Endpoints:
   POST /api/v1/scoring/hr/portfolio       — Compute H^R for all 5 companies
   POST /api/v1/scoring/hr/portfolio/report — Download report as .md
 
-Register in main.py:
-    from app.routers.hr_scoring import router as hr_router
-    app.include_router(hr_router)
+Already registered in main.py as hr_router.
 """
 
 from fastapi import APIRouter
@@ -37,6 +35,15 @@ COMPANY_SECTORS = {
     "WMT": "retail",
     "GE": "manufacturing",
     "DG": "retail",
+}
+
+# Manual market cap percentiles — mirrors position_factor.py
+MARKET_CAP_PERCENTILES = {
+    "NVDA": 0.95,
+    "JPM": 0.85,
+    "WMT": 0.60,
+    "GE": 0.50,
+    "DG": 0.30,
 }
 
 # Expected HR ranges (calculated from HR_base × (1 + 0.15 × PF_range))
@@ -99,6 +106,111 @@ class PortfolioHRResponse(BaseModel):
 
 
 # =====================================================================
+# TEMPORARY: _compute_tc_vr_local duplicate — pending Phase 4 extraction
+# into CompositeScoringService.  Delete this entire section once
+# CompositeScoringService is created.
+# =====================================================================
+
+import json as _json
+from pydantic import BaseModel as _BaseModel
+from typing import Optional as _Optional, List as _List, Dict as _Dict
+
+
+class _JobAnalysisOutputHR(_BaseModel):
+    total_ai_jobs: int
+    senior_ai_jobs: int
+    mid_ai_jobs: int
+    entry_ai_jobs: int
+    unique_skills: _List[str]
+
+
+class _VRBreakdownOutputHR(_BaseModel):
+    vr_score: float
+    weighted_dim_score: float
+    talent_risk_adj: float
+
+
+class _TCVRResponseHR(_BaseModel):
+    ticker: str
+    status: str
+    talent_concentration: _Optional[float] = None
+    vr_result: _Optional[_VRBreakdownOutputHR] = None
+    dimension_scores: _Optional[_Dict[str, float]] = None
+    duration_seconds: _Optional[float] = None
+    error: _Optional[str] = None
+
+
+def _load_jobs_s3_hr(ticker: str, s3) -> list:
+    """Load job postings from S3."""
+    prefix = f"signals/jobs/{ticker}/"
+    try:
+        keys = s3.list_files(prefix)
+        for key in sorted(keys, reverse=True):
+            raw = s3.get_file(key)
+            if raw is None:
+                continue
+            data = _json.loads(raw)
+            postings = data.get("job_postings", [])
+            if postings:
+                for p in postings:
+                    if "ai_skills_found" not in p:
+                        p["ai_skills_found"] = p.get("ai_keywords_found", [])
+                return postings
+    except Exception as exc:
+        logger.warning(f"[{ticker}] Job S3 load failed: {exc}")
+    return []
+
+
+# TEMPORARY: This is a duplicate pending Phase 4 extraction.
+# Delete this function once CompositeScoringService is created.
+def _compute_tc_vr_hr(ticker: str) -> _TCVRResponseHR:
+    """Compute V^R score without cross-router imports."""
+    start = time.time()
+    ticker = ticker.upper()
+    try:
+        from app.services.scoring_service import get_scoring_service
+        base_result = get_scoring_service().score_company(ticker)
+        dim_scores_list = base_result.get("dimension_scores", [])
+        dim_score_dict = {row["dimension"]: row["score"] for row in dim_scores_list}
+
+        from app.scoring.talent_concentration import TalentConcentrationCalculator
+        tc_calc = TalentConcentrationCalculator()
+        from app.services.s3_storage import get_s3_service
+        s3 = get_s3_service()
+
+        job_postings = _load_jobs_s3_hr(ticker, s3)
+        job_analysis = tc_calc.analyze_job_postings(job_postings)
+        glassdoor_reviews = tc_calc.load_glassdoor_reviews(ticker, s3)
+        indiv_mentions, rev_count = tc_calc.count_individual_mentions(glassdoor_reviews)
+        tc = tc_calc.calculate_tc(job_analysis, indiv_mentions, rev_count)
+
+        from app.scoring.vr_calculator import VRCalculator
+        vr_result = VRCalculator().calculate(dim_score_dict, float(tc))
+
+        return _TCVRResponseHR(
+            ticker=ticker, status="success",
+            talent_concentration=float(tc),
+            vr_result=_VRBreakdownOutputHR(
+                vr_score=float(vr_result.vr_score),
+                weighted_dim_score=float(vr_result.weighted_dim_score),
+                talent_risk_adj=float(vr_result.talent_risk_adj),
+            ),
+            dimension_scores=dim_score_dict,
+            duration_seconds=round(time.time() - start, 2),
+        )
+    except Exception as e:
+        logger.error(f"TC+VR scoring failed for {ticker}: {e}", exc_info=True)
+        return _TCVRResponseHR(
+            ticker=ticker, status="failed", error=str(e),
+            duration_seconds=round(time.time() - start, 2),
+        )
+
+# =====================================================================
+# END TEMPORARY SECTION
+# =====================================================================
+
+
+# =====================================================================
 # Helper: Compute H^R
 # =====================================================================
 
@@ -118,35 +230,39 @@ def _compute_hr(ticker: str) -> HRResponse:
         logger.info(f"🌐 H^R CALCULATION: {ticker}")
         logger.info("=" * 60)
         
-        # ---- 1. Get Position Factor from PF endpoint ----
-        from app.routers.position_factor import _compute_position_factor
-        pf_result = _compute_position_factor(ticker)
-        
-        if pf_result.status != "success":
-            raise ValueError(f"Position Factor calculation failed: {pf_result.error}")
-        
-        position_factor = pf_result.position_factor
-        logger.info(f"[{ticker}] Position Factor from PF endpoint: {position_factor:.4f}")
-        
-        # ---- 2. Get sector ----
+        # ---- 1. Compute Position Factor directly (no cross-router import) ----
+        tc_vr_result = _compute_tc_vr_hr(ticker)
+        if tc_vr_result.status != "success":
+            raise ValueError(f"TC+VR scoring failed: {tc_vr_result.error}")
+
+        vr_score = tc_vr_result.vr_result.vr_score
+
+        # ---- 2. Get sector + compute Position Factor directly ----
         sector = COMPANY_SECTORS.get(ticker)
         if sector is None:
             raise ValueError(f"No sector defined for {ticker}")
-        
+
+        market_cap_percentile = MARKET_CAP_PERCENTILES.get(ticker, 0.50)
+        from app.scoring.position_factor import PositionFactorCalculator
+        position_factor = float(PositionFactorCalculator().calculate_position_factor(
+            vr_score=float(vr_score), sector=sector, market_cap_percentile=market_cap_percentile
+        ))
+
         logger.info(f"[{ticker}] Sector: {sector}")
-        
+        logger.info(f"[{ticker}] Position Factor (computed inline): {position_factor:.4f}")
+
         # ---- 3. Calculate H^R ----
         from app.scoring.hr_calculator import HRCalculator
         hr_calc = HRCalculator()
-        
+
         hr_result = hr_calc.calculate(
             sector=sector,
             position_factor=position_factor
         )
-        
+
         # Get interpretation
         interpretation = hr_calc.interpret_hr_score(float(hr_result.hr_score))
-        
+
         logger.info(f"[{ticker}] H^R Breakdown:")
         logger.info(f"  Sector             = {sector}")
         logger.info(f"  HR Base            = {float(hr_result.hr_base):.2f}")

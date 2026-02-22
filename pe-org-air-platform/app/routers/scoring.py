@@ -11,9 +11,7 @@ Endpoints:
   GET  /api/v1/scoring/summary            — View all companies' dimension scores
   DELETE /api/v1/scoring/{ticker}         — Delete scoring data for a company
 
-Register in main.py:
-    from app.routers.scoring import router as scoring_router
-    app.include_router(scoring_router)
+Already registered in main.py as scoring_router.
 """
 
 from fastapi import APIRouter, HTTPException

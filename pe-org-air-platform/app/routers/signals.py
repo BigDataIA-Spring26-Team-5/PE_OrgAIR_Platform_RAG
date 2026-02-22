@@ -633,16 +633,84 @@ async def score_all_signals(ticker: str, force_refresh: bool = False):
     logger.info(f"{'=' * 60}")
 
     logger.info("[1/4] Technology Hiring...")
-    results["technology_hiring"] = await score_hiring(ticker, force_refresh)
+    start_h = time.time()
+    try:
+        svc = get_job_signal_service()
+        r = await svc.analyze_company(ticker, force_refresh=force_refresh)
+        results["technology_hiring"] = SingleSignalResponse(
+            ticker=ticker, category="technology_hiring", status="success",
+            score=r.get("normalized_score"), confidence=r.get("confidence"),
+            breakdown=r.get("breakdown"),
+            data_source="jobspy (linkedin, indeed, glassdoor)",
+            evidence_count=r.get("job_postings_analyzed", 0),
+            duration_seconds=round(time.time() - start_h, 2),
+        )
+    except Exception as e:
+        logger.error(f"Hiring scoring failed for {ticker}: {e}")
+        results["technology_hiring"] = SingleSignalResponse(
+            ticker=ticker, category="technology_hiring", status="failed",
+            error=str(e), duration_seconds=round(time.time() - start_h, 2),
+        )
 
     logger.info("[2/4] Digital Presence...")
-    results["digital_presence"] = await score_digital_presence(ticker, force_refresh)
+    start_d = time.time()
+    try:
+        svc = get_tech_signal_service()
+        r = await svc.analyze_company(ticker, force_refresh=force_refresh)
+        results["digital_presence"] = SingleSignalResponse(
+            ticker=ticker, category="digital_presence", status="success",
+            score=r.get("normalized_score"), confidence=r.get("confidence"),
+            breakdown=r.get("breakdown"),
+            data_source=", ".join(r.get("data_sources", ["builtwith", "wappalyzer"])),
+            evidence_count=r.get("tech_metrics", {}).get("total_technologies", 0),
+            duration_seconds=round(time.time() - start_d, 2),
+        )
+    except Exception as e:
+        logger.error(f"Digital presence scoring failed for {ticker}: {e}")
+        results["digital_presence"] = SingleSignalResponse(
+            ticker=ticker, category="digital_presence", status="failed",
+            error=str(e), duration_seconds=round(time.time() - start_d, 2),
+        )
 
     logger.info("[3/4] Innovation Activity...")
-    results["innovation_activity"] = await score_innovation(ticker)
+    start_i = time.time()
+    try:
+        svc = get_patent_signal_service()
+        r = await svc.analyze_company(ticker)
+        results["innovation_activity"] = SingleSignalResponse(
+            ticker=ticker, category="innovation_activity", status="success",
+            score=r.get("normalized_score"), confidence=r.get("confidence"),
+            breakdown=r.get("breakdown"),
+            data_source="patentsview (USPTO)",
+            evidence_count=r.get("patent_metrics", {}).get("total_patents", r.get("total_patents", 0)),
+            duration_seconds=round(time.time() - start_i, 2),
+        )
+    except Exception as e:
+        logger.error(f"Innovation scoring failed for {ticker}: {e}")
+        results["innovation_activity"] = SingleSignalResponse(
+            ticker=ticker, category="innovation_activity", status="failed",
+            error=str(e), duration_seconds=round(time.time() - start_i, 2),
+        )
 
     logger.info("[4/4] Leadership Signals...")
-    results["leadership_signals"] = await score_leadership(ticker)
+    start_l = time.time()
+    try:
+        svc = get_leadership_service()
+        r = await svc.analyze_company(ticker)
+        results["leadership_signals"] = SingleSignalResponse(
+            ticker=ticker, category="leadership_signals", status="success",
+            score=r.get("normalized_score"), confidence=r.get("confidence"),
+            breakdown=r.get("breakdown"),
+            data_source="sec_edgar (DEF 14A proxy statements)",
+            evidence_count=r.get("filing_count_analyzed", r.get("filings_analyzed", 0)),
+            duration_seconds=round(time.time() - start_l, 2),
+        )
+    except Exception as e:
+        logger.error(f"Leadership scoring failed for {ticker}: {e}")
+        results["leadership_signals"] = SingleSignalResponse(
+            ticker=ticker, category="leadership_signals", status="failed",
+            error=str(e), duration_seconds=round(time.time() - start_l, 2),
+        )
 
     # Calculate composite
     scores = {cat: results[cat].score for cat in COMPOSITE_WEIGHTS}

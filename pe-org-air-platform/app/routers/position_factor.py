@@ -6,9 +6,7 @@ Endpoints:
   POST /api/v1/scoring/pf/portfolio       — Compute PF for all 5 CS3 companies
   POST /api/v1/scoring/pf/portfolio/report — Download report as .md file
 
-Register in main.py:
-    from app.routers.position_factor import router as pf_router
-    app.include_router(pf_router)
+Already registered in main.py as pf_router.
 """
 
 from fastapi import APIRouter
@@ -109,6 +107,181 @@ class PortfolioPFResponse(BaseModel):
 
 
 # =====================================================================
+# TEMPORARY: _compute_tc_vr duplicate — pending Phase 4 extraction
+# into CompositeScoringService.  Delete this entire section once
+# CompositeScoringService is created.
+# =====================================================================
+
+import json as _json
+from pydantic import BaseModel as _BaseModel
+from typing import Optional as _Optional, List as _List, Dict as _Dict
+
+_TC_VR_EXPECTED_RANGES_PF = {
+    "NVDA": {"tc": (0.05, 0.20), "pf": (0.7, 1.0),  "vr": (80, 100)},
+    "JPM":  {"tc": (0.10, 0.25), "pf": (0.3, 0.7),  "vr": (60, 80)},
+    "WMT":  {"tc": (0.12, 0.28), "pf": (0.1, 0.5),  "vr": (50, 70)},
+    "GE":   {"tc": (0.18, 0.35), "pf": (-0.2, 0.2), "vr": (40, 60)},
+    "DG":   {"tc": (0.22, 0.40), "pf": (-0.5, -0.1),"vr": (30, 50)},
+}
+
+
+class _JobAnalysisOutput(_BaseModel):
+    total_ai_jobs: int
+    senior_ai_jobs: int
+    mid_ai_jobs: int
+    entry_ai_jobs: int
+    unique_skills: _List[str]
+
+
+class _TCBreakdown(_BaseModel):
+    leadership_ratio: float
+    team_size_factor: float
+    skill_concentration: float
+    individual_factor: float
+
+
+class _VRBreakdownOutput(_BaseModel):
+    vr_score: float
+    weighted_dim_score: float
+    talent_risk_adj: float
+
+
+class _ValidationOutput(_BaseModel):
+    tc_in_range: bool
+    tc_expected: str
+    vr_in_range: bool
+    vr_expected: str
+
+
+class _TCVRResponse(_BaseModel):
+    ticker: str
+    status: str
+    talent_concentration: _Optional[float] = None
+    tc_breakdown: _Optional[_TCBreakdown] = None
+    job_analysis: _Optional[_JobAnalysisOutput] = None
+    individual_mentions: _Optional[int] = None
+    review_count: _Optional[int] = None
+    ai_mentions: _Optional[int] = None
+    vr_result: _Optional[_VRBreakdownOutput] = None
+    dimension_scores: _Optional[_Dict[str, float]] = None
+    validation: _Optional[_ValidationOutput] = None
+    duration_seconds: _Optional[float] = None
+    error: _Optional[str] = None
+    scored_at: _Optional[str] = None
+
+
+def _load_jobs_s3_pf(ticker: str, s3) -> list:
+    """Load job postings from S3 — mirrors tc_vr_scoring._load_jobs_s3."""
+    prefix = f"signals/jobs/{ticker}/"
+    try:
+        keys = s3.list_files(prefix)
+        for key in sorted(keys, reverse=True):
+            raw = s3.get_file(key)
+            if raw is None:
+                continue
+            data = _json.loads(raw)
+            postings = data.get("job_postings", [])
+            if postings:
+                for p in postings:
+                    if "ai_skills_found" not in p:
+                        p["ai_skills_found"] = p.get("ai_keywords_found", [])
+                return postings
+    except Exception as exc:
+        logger.warning(f"[{ticker}] Job S3 load failed: {exc}")
+    return []
+
+
+# TEMPORARY: This is a duplicate pending Phase 4 extraction.
+# Delete this function once CompositeScoringService is created.
+def _compute_tc_vr_local(ticker: str) -> _TCVRResponse:
+    """
+    Compute TC + V^R without cross-router imports.
+    Duplicated from tc_vr_scoring._compute_tc_vr to remove cross-router import.
+    """
+    start = time.time()
+    ticker = ticker.upper()
+    try:
+        from app.services.scoring_service import get_scoring_service
+        scoring_svc = get_scoring_service()
+        base_result = scoring_svc.score_company(ticker)
+        dim_scores_list = base_result.get("dimension_scores", [])
+
+        from app.scoring.talent_concentration import TalentConcentrationCalculator
+        tc_calc = TalentConcentrationCalculator()
+        from app.services.s3_storage import get_s3_service
+        s3 = get_s3_service()
+
+        job_postings = _load_jobs_s3_pf(ticker, s3)
+        job_analysis = tc_calc.analyze_job_postings(job_postings)
+        glassdoor_reviews = tc_calc.load_glassdoor_reviews(ticker, s3)
+        indiv_mentions, rev_count = tc_calc.count_individual_mentions(glassdoor_reviews)
+        ai_mentions, _ = tc_calc.count_ai_mentions(glassdoor_reviews)
+        tc = tc_calc.calculate_tc(job_analysis, indiv_mentions, rev_count)
+
+        total = job_analysis.total_ai_jobs
+        senior = job_analysis.senior_ai_jobs
+        leadership_ratio = senior / total if total > 0 else 0.5
+        team_size_factor = min(1.0, 1.0 / (total ** 0.5 + 0.1)) if total > 0 else min(1.0, 1.0 / 0.1)
+        skill_concentration = max(0.0, 1.0 - len(job_analysis.unique_skills) / 15)
+        individual_factor = indiv_mentions / rev_count if rev_count > 0 else 0.5
+
+        from app.scoring.vr_calculator import VRCalculator
+        vr_calc = VRCalculator()
+        dim_score_dict = {row["dimension"]: row["score"] for row in dim_scores_list}
+        vr_result = vr_calc.calculate(dim_score_dict, float(tc))
+
+        validation = None
+        if ticker in _TC_VR_EXPECTED_RANGES_PF:
+            exp = _TC_VR_EXPECTED_RANGES_PF[ticker]
+            tc_ok = exp["tc"][0] <= float(tc) <= exp["tc"][1]
+            vr_ok = exp["vr"][0] <= float(vr_result.vr_score) <= exp["vr"][1]
+            validation = _ValidationOutput(
+                tc_in_range=tc_ok,
+                tc_expected=f"{exp['tc'][0]:.2f} - {exp['tc'][1]:.2f}",
+                vr_in_range=vr_ok,
+                vr_expected=f"{exp['vr'][0]} - {exp['vr'][1]}",
+            )
+
+        from datetime import datetime, timezone as _tz
+        return _TCVRResponse(
+            ticker=ticker, status="success",
+            talent_concentration=float(tc),
+            tc_breakdown=_TCBreakdown(
+                leadership_ratio=round(leadership_ratio, 4),
+                team_size_factor=round(team_size_factor, 4),
+                skill_concentration=round(skill_concentration, 4),
+                individual_factor=round(individual_factor, 4),
+            ),
+            job_analysis=_JobAnalysisOutput(
+                total_ai_jobs=job_analysis.total_ai_jobs,
+                senior_ai_jobs=job_analysis.senior_ai_jobs,
+                mid_ai_jobs=job_analysis.mid_ai_jobs,
+                entry_ai_jobs=job_analysis.entry_ai_jobs,
+                unique_skills=sorted(job_analysis.unique_skills),
+            ),
+            individual_mentions=indiv_mentions, review_count=rev_count, ai_mentions=ai_mentions,
+            vr_result=_VRBreakdownOutput(
+                vr_score=float(vr_result.vr_score),
+                weighted_dim_score=float(vr_result.weighted_dim_score),
+                talent_risk_adj=float(vr_result.talent_risk_adj),
+            ),
+            dimension_scores=dim_score_dict, validation=validation,
+            duration_seconds=round(time.time() - start, 2),
+            scored_at=datetime.now(_tz.utc).isoformat(),
+        )
+    except Exception as e:
+        logger.error(f"TC+VR scoring failed for {ticker}: {e}", exc_info=True)
+        return _TCVRResponse(
+            ticker=ticker, status="failed", error=str(e),
+            duration_seconds=round(time.time() - start, 2),
+        )
+
+# =====================================================================
+# END TEMPORARY SECTION
+# =====================================================================
+
+
+# =====================================================================
 # Helper: Compute Position Factor
 # =====================================================================
 
@@ -128,15 +301,14 @@ def _compute_position_factor(ticker: str) -> PFResponse:
         logger.info(f"📍 POSITION FACTOR CALCULATION: {ticker}")
         logger.info("=" * 60)
         
-        # ---- 1. Get VR score from TC+VR endpoint ----
-        from app.routers.tc_vr_scoring import _compute_tc_vr
-        tc_vr_result = _compute_tc_vr(ticker)
-        
+        # ---- 1. Get VR score (local compute — no cross-router import) ----
+        tc_vr_result = _compute_tc_vr_local(ticker)
+
         if tc_vr_result.status != "success":
             raise ValueError(f"TC+VR scoring failed: {tc_vr_result.error}")
-        
+
         vr_score = tc_vr_result.vr_result.vr_score
-        logger.info(f"[{ticker}] VR Score from TC+VR endpoint: {vr_score:.2f}")
+        logger.info(f"[{ticker}] VR Score: {vr_score:.2f}")
         
         # ---- 2. Get manual inputs ----
         market_cap_percentile = MARKET_CAP_PERCENTILES.get(ticker)

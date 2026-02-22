@@ -6,9 +6,7 @@ Endpoints:
   POST /api/v1/scoring/tc-vr/portfolio     — Compute TC + V^R for all 5 CS3 companies
   GET  /api/v1/scoring/tc-vr/{ticker}      — View last computed TC + V^R (from Snowflake)
 
-Register in main.py:
-    from app.routers.tc_vr_scoring import router as tc_vr_router
-    app.include_router(tc_vr_router)
+Already registered in main.py as tc_vr_router.
 """
 
 from fastapi import APIRouter, HTTPException
