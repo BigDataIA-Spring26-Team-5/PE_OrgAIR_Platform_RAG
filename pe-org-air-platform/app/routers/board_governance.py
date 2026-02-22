@@ -11,15 +11,11 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from app.pipelines.board_analyzer import (
-    BoardCompositionAnalyzer,
     CompanyRegistry,
     GovernanceSignal,
-    _signal_to_dict,
-    save_signal,
 )
-from app.services.s3_storage import get_s3_service
-from app.repositories.document_repository import get_document_repository
-from app.repositories.company_repository import CompanyRepository as get_company_repository
+from app.services.board_governance_service import get_board_governance_service
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/board-governance", tags=["Board Governance"])
@@ -69,36 +65,11 @@ class BatchOut(BaseModel):
 # Helpers
 # ────────────────────────────────────────────────────────────────
 
-def _get_analyzer() -> BoardCompositionAnalyzer:
-    try:
-        s3 = get_s3_service()
-    except Exception:
-        s3 = None
-    try:
-        doc_repo = get_document_repository()
-    except Exception:
-        doc_repo = None
-    return BoardCompositionAnalyzer(s3=s3, doc_repo=doc_repo)
-
-
-def _resolve_company_id(ticker: str) -> str:
-    try:
-        repo = get_company_repository()
-        company = repo.get_by_ticker(ticker.upper())
-        if company:
-            return company["id"]
-    except Exception:
-        pass
-    return ticker.upper()
-
-
 def _to_response(
     signal: GovernanceSignal,
     trail: dict,
     s3_key: Optional[str] = None,
 ) -> GovernanceOut:
-    from decimal import Decimal
-
     conf = float(signal.confidence)
     return GovernanceOut(
         company_id=signal.company_id,
@@ -126,36 +97,6 @@ def _to_response(
     )
 
 
-def _board_save_to_s3(signal: GovernanceSignal, evidence_trail: dict) -> Optional[str]:
-    from datetime import datetime, timezone
-    s3 = get_s3_service()
-    data = _signal_to_dict(signal)
-    data["_meta"] = {
-        "signal_type": "board_composition",
-        "generated_at": datetime.now(timezone.utc).isoformat(),
-        "source": "CS3 Task 5.0d",
-        "score_breakdown": evidence_trail or {},
-    }
-    return s3.store_signal_data(signal_type="board_composition", ticker=signal.ticker.upper(), data=data)
-
-
-def _analyze_one(analyzer: BoardCompositionAnalyzer, ticker: str) -> tuple[GovernanceSignal, dict, Optional[str]]:
-    """Run analysis, save locally + S3, return (signal, trail, s3_key)."""
-    company_id = _resolve_company_id(ticker)
-    signal = analyzer.scrape_and_analyze(ticker=ticker, company_id=company_id)
-    trail = analyzer.get_last_evidence_trail()
-
-    save_signal(signal)
-
-    s3_key = None
-    try:
-        s3_key = _board_save_to_s3(signal, evidence_trail=trail)
-    except Exception as e:
-        logger.warning(f"[{ticker}] S3 save failed: {e}")
-
-    return signal, trail, s3_key
-
-
 # ────────────────────────────────────────────────────────────────
 # POST /analyze/{ticker}  — single company
 # ────────────────────────────────────────────────────────────────
@@ -169,9 +110,8 @@ async def analyze_ticker(ticker: str):
     except ValueError:
         raise HTTPException(404, f"Ticker '{ticker}' not registered. Available: {CompanyRegistry.all_tickers()}")
 
-    analyzer = _get_analyzer()
     try:
-        signal, trail, s3_key = _analyze_one(analyzer, ticker)
+        signal, trail, s3_key = get_board_governance_service().analyze(ticker)
     except Exception as e:
         logger.error(f"[{ticker}] Analysis failed: {e}")
         raise HTTPException(500, f"Analysis failed: {e}")
@@ -187,14 +127,14 @@ async def analyze_ticker(ticker: str):
 async def analyze_all():
     """Analyze board governance for all 5 CS3 companies (NVDA, JPM, WMT, GE, DG)."""
     tickers = CompanyRegistry.all_tickers()
-    analyzer = _get_analyzer()
+    svc = get_board_governance_service()
 
     results: List[GovernanceOut] = []
     errors: List[dict] = []
 
     for ticker in tickers:
         try:
-            signal, trail, s3_key = _analyze_one(analyzer, ticker)
+            signal, trail, s3_key = svc.analyze(ticker)
             results.append(_to_response(signal, trail, s3_key))
         except Exception as e:
             logger.error(f"[{ticker}] Failed: {e}")
@@ -226,25 +166,17 @@ async def get_governance_score(ticker: str):
     except ValueError:
         raise HTTPException(404, f"Ticker '{ticker}' not registered")
 
-    # Try S3 first
-    try:
-        s3 = get_s3_service()
-        keys = s3.list_files(f"signals/board_composition/{ticker}/")
-        if keys:
-            latest = sorted(keys)[-1]
-            data = s3.get_file(latest)
-            if data:
-                import json
-                return json.loads(data.decode("utf-8"))
-    except Exception as e:
-        logger.warning(f"[{ticker}] S3 read failed, running live analysis: {e}")
+    svc = get_board_governance_service()
 
-    # Fallback: live analysis (don't persist on GET)
-    analyzer = _get_analyzer()
+    # Try S3 first
+    data, _ = svc.get(ticker)
+    if data is not None:
+        return data
+
+    # Fallback: live analysis
     try:
-        signal = analyzer.scrape_and_analyze(ticker=ticker, company_id=_resolve_company_id(ticker))
-        trail = analyzer.get_last_evidence_trail()
-        return _to_response(signal, trail)
+        signal, trail, s3_key = svc.analyze(ticker)
+        return _to_response(signal, trail, s3_key)
     except Exception as e:
         raise HTTPException(500, f"Analysis failed: {e}")
 
@@ -261,39 +193,21 @@ async def get_all_governance_scores():
     Tries S3 first per ticker. Falls back to live analysis for any missing.
     """
     tickers = CompanyRegistry.all_tickers()
+    svc = get_board_governance_service()
     results = []
     errors = []
 
-    s3 = None
-    try:
-        s3 = get_s3_service()
-    except Exception:
-        pass
-
-    analyzer = None  # lazy init only if needed
-
     for ticker in tickers:
         # Try S3
-        if s3:
-            try:
-                keys = s3.list_files(f"signals/board_composition/{ticker}/")
-                if keys:
-                    latest = sorted(keys)[-1]
-                    data = s3.get_file(latest)
-                    if data:
-                        import json
-                        results.append(json.loads(data.decode("utf-8")))
-                        continue
-            except Exception as e:
-                logger.warning(f"[{ticker}] S3 read failed: {e}")
+        data, _ = svc.get(ticker)
+        if data is not None:
+            results.append(data)
+            continue
 
         # Fallback: live
         try:
-            if analyzer is None:
-                analyzer = _get_analyzer()
-            signal = analyzer.scrape_and_analyze(ticker=ticker, company_id=_resolve_company_id(ticker))
-            trail = analyzer.get_last_evidence_trail()
-            results.append(_to_response(signal, trail).model_dump())
+            signal, trail, s3_key = svc.analyze(ticker)
+            results.append(_to_response(signal, trail, s3_key).model_dump())
         except Exception as e:
             logger.error(f"[{ticker}] Failed: {e}")
             errors.append({"ticker": ticker, "error": str(e)})

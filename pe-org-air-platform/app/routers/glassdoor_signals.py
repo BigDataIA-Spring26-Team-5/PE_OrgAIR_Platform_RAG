@@ -14,17 +14,14 @@ S3 paths:
 
 from __future__ import annotations
 
-import json
 import logging
 import time
-from dataclasses import asdict
-from decimal import Decimal
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from app.services.s3_storage import get_s3_service
+from app.services.culture_signal_service import get_culture_signal_service, CultureCollectResult
 
 logger = logging.getLogger(__name__)
 
@@ -100,67 +97,6 @@ class PortfolioCultureResponse(BaseModel):
 
 
 # =====================================================================
-# Helpers
-# =====================================================================
-
-def _load_latest_culture_json(ticker: str) -> tuple[Optional[Dict], Optional[str]]:
-    """
-    Load the latest culture signal JSON from S3 for a given ticker.
-
-    Tries:
-      1. glassdoor_signals/output/{TICKER}/ → pick the latest file by name sort
-      2. glassdoor_signals/output/{TICKER}_culture.json (flat fallback)
-
-    Returns (data_dict, s3_key) or (None, None).
-    """
-    s3 = get_s3_service()
-    ticker_upper = ticker.upper()
-
-    # Attempt 1: timestamped subfolder (latest file)
-    prefix = f"glassdoor_signals/output/{ticker_upper}/"
-    keys = s3.list_files(prefix)
-    if keys:
-        latest_key = sorted(keys)[-1]
-        raw = s3.get_file(latest_key)
-        if raw is not None:
-            data = json.loads(raw if isinstance(raw, str) else raw.decode("utf-8"))
-            return data, latest_key
-
-    # Attempt 2: flat file
-    flat_key = f"glassdoor_signals/output/{ticker_upper}_culture.json"
-    raw = s3.get_file(flat_key)
-    if raw is not None:
-        data = json.loads(raw if isinstance(raw, str) else raw.decode("utf-8"))
-        return data, flat_key
-
-    return None, None
-
-
-def _load_latest_raw_json(ticker: str) -> tuple[Optional[Dict], Optional[str]]:
-    """Load the latest raw reviews JSON from S3."""
-    s3 = get_s3_service()
-    ticker_upper = ticker.upper()
-
-    prefix = f"glassdoor_signals/raw/{ticker_upper}/"
-    keys = s3.list_files(prefix)
-    if keys:
-        latest_key = sorted(keys)[-1]
-        raw = s3.get_file(latest_key)
-        if raw is not None:
-            data = json.loads(raw if isinstance(raw, str) else raw.decode("utf-8"))
-            return data, latest_key
-
-    return None, None
-
-def _upsert_culture_to_snowflake(ticker: str, signal_data: Dict) -> bool:
-    """Upsert glassdoor_reviews into signal_dimension_mapping via ScoringRepository."""
-    from app.repositories.scoring_repository import get_scoring_repository
-    result = get_scoring_repository().upsert_culture_mapping(ticker, signal_data)
-    if result:
-        logger.info(f"[{ticker}] Upserted glassdoor_reviews to Snowflake signal_dimension_mapping")
-    return result
-
-# =====================================================================
 # POST /api/v1/glassdoor-signals/{ticker} — Collect + save to S3 + Snowflake
 # =====================================================================
 
@@ -193,79 +129,50 @@ async def collect_culture_signal(ticker: str):
         )
 
     try:
-        from app.pipelines.glassdoor_collector import CultureCollector
+        logger.info("=" * 60)
+        logger.info("GLASSDOOR COLLECTION: %s", ticker)
+        logger.info("=" * 60)
 
-        logger.info(f"{'=' * 60}")
-        logger.info(f"GLASSDOOR COLLECTION: {ticker}")
-        logger.info(f"{'=' * 60}")
+        result: CultureCollectResult = get_culture_signal_service().collect(ticker)
 
-        collector = CultureCollector()
-
-        try:
-            # Run full collection: scrape + analyze + upload to S3
-            signal = collector.collect_and_analyze(
-                ticker=ticker,
-                sources=["glassdoor", "indeed", "careerbliss"],
-                use_cache=True,
+        raw_reviews = [
+            ReviewOut(
+                ticker=r.get("ticker", ticker),
+                source=r.get("source", "unknown"),
+                review_id=r.get("review_id", ""),
+                rating=r.get("rating"),
+                title=r.get("title"),
+                pros=r.get("pros"),
+                cons=r.get("cons"),
+                advice_to_management=r.get("advice_to_management"),
+                is_current_employee=r.get("is_current_employee"),
+                job_title=r.get("job_title"),
+                review_date=r.get("review_date"),
             )
-        finally:
-            collector.close_browser()
-
-        # Convert signal to dict for scores
-        signal_dict = {}
-        for k, v in asdict(signal).items():
-            signal_dict[k] = float(v) if isinstance(v, Decimal) else v
-
-        # Upsert to Snowflake
-        sf_ok = _upsert_culture_to_snowflake(ticker, signal_dict)
-
-        # Load the raw data that was just uploaded to S3
-        raw_data, raw_s3_key = _load_latest_raw_json(ticker)
-        raw_reviews: List[ReviewOut] = []
-        source_counts: Dict[str, int] = {}
-
-        if raw_data and "reviews" in raw_data:
-            for r in raw_data["reviews"]:
-                raw_reviews.append(ReviewOut(
-                    ticker=r.get("ticker", ticker),
-                    source=r.get("source", "unknown"),
-                    review_id=r.get("review_id", ""),
-                    rating=r.get("rating"),
-                    title=r.get("title"),
-                    pros=r.get("pros"),
-                    cons=r.get("cons"),
-                    advice_to_management=r.get("advice_to_management"),
-                    is_current_employee=r.get("is_current_employee"),
-                    job_title=r.get("job_title"),
-                    review_date=r.get("review_date"),
-                ))
-                src = r.get("source", "unknown")
-                source_counts[src] = source_counts.get(src, 0) + 1
-
-        # Find the output S3 key
-        _, output_s3_key = _load_latest_culture_json(ticker)
+            for r in result.raw_reviews
+        ]
 
         return CollectCultureResponse(
             ticker=ticker,
             status="success",
             review_count=len(raw_reviews),
-            sources_collected=source_counts,
-            s3_raw_key=raw_s3_key,
-            s3_output_key=output_s3_key,
-            snowflake_upserted=sf_ok,
+            sources_collected=result.source_counts,
+            s3_raw_key=result.raw_s3_key,
+            s3_output_key=result.output_s3_key,
+            snowflake_upserted=result.snowflake_ok,
             culture_scores={
-                "overall_score": signal_dict.get("overall_score"),
-                "innovation_score": signal_dict.get("innovation_score"),
-                "data_driven_score": signal_dict.get("data_driven_score"),
-                "ai_awareness_score": signal_dict.get("ai_awareness_score"),
-                "change_readiness_score": signal_dict.get("change_readiness_score"),
+                "overall_score": result.signal_dict.get("overall_score"),
+                "innovation_score": result.signal_dict.get("innovation_score"),
+                "data_driven_score": result.signal_dict.get("data_driven_score"),
+                "ai_awareness_score": result.signal_dict.get("ai_awareness_score"),
+                "change_readiness_score": result.signal_dict.get("change_readiness_score"),
             },
             raw_reviews=raw_reviews,
             duration_seconds=round(time.time() - start, 2),
         )
 
     except Exception as e:
-        logger.error(f"Culture collection failed for {ticker}: {e}", exc_info=True)
+        logger.error("Culture collection failed for %s: %s", ticker, e, exc_info=True)
         return CollectCultureResponse(
             ticker=ticker,
             status="failed",
@@ -292,7 +199,7 @@ async def collect_culture_signal(ticker: str):
 async def get_culture_signal(ticker: str):
     """Return the full Glassdoor culture signal breakdown for a single ticker."""
     ticker = ticker.upper()
-    data, s3_key = _load_latest_culture_json(ticker)
+    data, s3_key = get_culture_signal_service().get(ticker)
 
     if data is None:
         raise HTTPException(
@@ -333,13 +240,14 @@ async def get_culture_signal(ticker: str):
 )
 async def get_all_culture_signals():
     """Return culture signal breakdowns for the entire CS3 portfolio."""
+    svc = get_culture_signal_service()
     results: List[CultureSignalDetailOut] = []
     summary: List[Dict[str, Any]] = []
     found = 0
     missing = 0
 
     for ticker in CS3_PORTFOLIO:
-        data, s3_key = _load_latest_culture_json(ticker)
+        data, s3_key = svc.get(ticker)
 
         if data is not None:
             found += 1

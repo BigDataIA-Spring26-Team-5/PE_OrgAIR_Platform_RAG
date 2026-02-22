@@ -5,7 +5,7 @@ from typing import Dict, List
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field
 
 from app.core.dependencies import get_dimension_score_repository
 from app.models.dimension import (
@@ -281,39 +281,6 @@ PUT_RESPONSES = {
         }
     }
 }
-
-
-
-# PYDANTIC VALIDATOR: WEIGHTS SUM TO 1.0
-
-
-class WeightValidationMixin(BaseModel):
-    """Mixin class to validate that dimension weights sum to 1.0"""
-    
-    @model_validator(mode='after')
-    def validate_weights_sum(self) -> 'WeightValidationMixin':
-        total_weight = sum(DIMENSION_WEIGHTS.values())
-        if not (0.999 <= total_weight <= 1.001):
-            raise ValueError(f"Dimension weights must sum to 1.0, but got {total_weight}")
-        return self
-
-
-
-# BULK CREATE REQUEST SCHEMA WITH WEIGHT VALIDATION
-
-
-class BulkDimensionScoreCreate(BaseModel):
-    """Schema for bulk creating dimension scores with weight validation."""
-    scores: List[DimensionScoreCreate] = Field(..., description="List of dimension scores to create")
-    
-    @model_validator(mode='after')
-    def validate_custom_weights_sum(self) -> 'BulkDimensionScoreCreate':
-        custom_weights = [score.weight for score in self.scores if score.weight is not None]
-        if custom_weights:
-            total_custom_weight = sum(custom_weights)
-            if not (0.999 <= total_custom_weight <= 1.001):
-                raise ValueError(f"Custom weights must sum to 1.0, but got {total_custom_weight}")
-        return self
 
 
 
