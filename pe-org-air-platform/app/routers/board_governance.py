@@ -14,8 +14,8 @@ from app.pipelines.board_analyzer import (
     BoardCompositionAnalyzer,
     CompanyRegistry,
     GovernanceSignal,
+    _signal_to_dict,
     save_signal,
-    save_signal_to_s3,
 )
 from app.services.s3_storage import get_s3_service
 from app.repositories.document_repository import get_document_repository
@@ -126,6 +126,19 @@ def _to_response(
     )
 
 
+def _board_save_to_s3(signal: GovernanceSignal, evidence_trail: dict) -> Optional[str]:
+    from datetime import datetime, timezone
+    s3 = get_s3_service()
+    data = _signal_to_dict(signal)
+    data["_meta"] = {
+        "signal_type": "board_composition",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "source": "CS3 Task 5.0d",
+        "score_breakdown": evidence_trail or {},
+    }
+    return s3.store_signal_data(signal_type="board_composition", ticker=signal.ticker.upper(), data=data)
+
+
 def _analyze_one(analyzer: BoardCompositionAnalyzer, ticker: str) -> tuple[GovernanceSignal, dict, Optional[str]]:
     """Run analysis, save locally + S3, return (signal, trail, s3_key)."""
     company_id = _resolve_company_id(ticker)
@@ -136,7 +149,7 @@ def _analyze_one(analyzer: BoardCompositionAnalyzer, ticker: str) -> tuple[Gover
 
     s3_key = None
     try:
-        s3_key = save_signal_to_s3(signal, evidence_trail=trail)
+        s3_key = _board_save_to_s3(signal, evidence_trail=trail)
     except Exception as e:
         logger.warning(f"[{ticker}] S3 save failed: {e}")
 

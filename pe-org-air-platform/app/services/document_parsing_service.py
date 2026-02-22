@@ -5,6 +5,7 @@ from dataclasses import asdict
 from app.pipelines.document_parser import get_document_parser, ParsedDocument
 from app.services.s3_storage import get_s3_service
 from app.repositories.document_repository import get_document_repository
+from app.services.utils import make_singleton_factory
 
 logging.basicConfig(
     level=logging.INFO,
@@ -228,11 +229,4 @@ class DocumentParsingService:
         }
 
 
-# Singleton
-_service: Optional[DocumentParsingService] = None
-
-def get_document_parsing_service() -> DocumentParsingService:
-    global _service
-    if _service is None:
-        _service = DocumentParsingService()
-    return _service
+get_document_parsing_service = make_singleton_factory(DocumentParsingService)

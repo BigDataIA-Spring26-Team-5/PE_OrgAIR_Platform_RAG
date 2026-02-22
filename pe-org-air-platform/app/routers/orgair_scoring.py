@@ -151,7 +151,7 @@ class ResultsGenerationResponse(BaseModel):
 # Helper: Compute Org-AI-R (Fix #7 — no double execution)
 # =====================================================================
 
-def _compute_orgair(ticker: str) -> OrgAIRResponse:
+def _compute_orgair(ticker: str, _precomputed_vr=None) -> OrgAIRResponse:
     start = time.time()
     ticker = ticker.upper()
 
@@ -162,7 +162,7 @@ def _compute_orgair(ticker: str) -> OrgAIRResponse:
 
         # ---- 1. Get V^R ----
         from app.routers.tc_vr_scoring import _compute_tc_vr
-        vr_response = _compute_tc_vr(ticker)
+        vr_response = _precomputed_vr if _precomputed_vr is not None else _compute_tc_vr(ticker)
 
         if vr_response.status != "success":
             raise ValueError(f"V^R calculation failed: {vr_response.error}")
@@ -304,15 +304,7 @@ async def generate_results():
         logger.info(f"\n{'─'*50}")
         logger.info(f"Scoring {ticker}...")
 
-        # 1. Run Org-AI-R
-        response = _compute_orgair(ticker)
-        if response.status != "success":
-            logger.error(f"[{ticker}] FAILED: {response.error}")
-            continue
-
-        b = response.breakdown
-
-        # 2. Get TC+VR details for dimension scores
+        # 1. Compute TC+VR once; reuse for Org-AI-R to avoid a double pipeline run
         from app.routers.tc_vr_scoring import _compute_tc_vr
         tc_vr = _compute_tc_vr(ticker)
 
@@ -320,6 +312,14 @@ async def generate_results():
         tc_breakdown = tc_vr.tc_breakdown if tc_vr else None
         dim_scores = tc_vr.dimension_scores if tc_vr else None
         job_analysis = tc_vr.job_analysis if tc_vr else None
+
+        # 2. Run Org-AI-R (pass pre-computed VR to avoid second _compute_tc_vr call)
+        response = _compute_orgair(ticker, _precomputed_vr=tc_vr)
+        if response.status != "success":
+            logger.error(f"[{ticker}] FAILED: {response.error}")
+            continue
+
+        b = response.breakdown
 
         # 3. Get PF
         from app.scoring.position_factor import PositionFactorCalculator
@@ -643,26 +643,15 @@ class PortfolioOrgAIRScoringResponse(BaseModel):
 
 
 def _fetch_orgair_row(ticker: str) -> Optional[OrgAIRScoringRecord]:
-    from app.services.snowflake import get_snowflake_connection
-    from snowflake.connector import DictCursor
-    conn = get_snowflake_connection()
-    try:
-        cursor = conn.cursor(DictCursor)
-        cursor.execute(
-            "SELECT ticker, org_air, scored_at, updated_at FROM SCORING WHERE ticker = %s",
-            [ticker.upper()],
-        )
-        row = cursor.fetchone()
-        cursor.close()
-        if not row:
-            return None
-        return OrgAIRScoringRecord(
-            ticker=row["TICKER"], org_air=row.get("ORG_AIR"),
-            scored_at=str(row["SCORED_AT"]) if row.get("SCORED_AT") else None,
-            updated_at=str(row["UPDATED_AT"]) if row.get("UPDATED_AT") else None,
-        )
-    finally:
-        conn.close()
+    from app.repositories.scoring_read_repository import get_scoring_read_repo
+    row = get_scoring_read_repo().fetch_orgair_row(ticker)
+    if not row:
+        return None
+    return OrgAIRScoringRecord(
+        ticker=row["TICKER"], org_air=row.get("ORG_AIR"),
+        scored_at=str(row["SCORED_AT"]) if row.get("SCORED_AT") else None,
+        updated_at=str(row["UPDATED_AT"]) if row.get("UPDATED_AT") else None,
+    )
 
 
 @router.get("/orgair/portfolio", response_model=PortfolioOrgAIRScoringResponse,

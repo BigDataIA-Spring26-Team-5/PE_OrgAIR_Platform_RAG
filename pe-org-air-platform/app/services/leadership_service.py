@@ -1,4 +1,5 @@
 # app/services/leadership_service.py
+from app.services.utils import make_singleton_factory
 """
 Leadership Signal Service — DEF 14A Analysis Orchestrator
 
@@ -345,12 +346,4 @@ class LeadershipSignalService:
         }
 
 
-# ── Singleton ──
-_service: Optional[LeadershipSignalService] = None
-
-
-def get_leadership_service() -> LeadershipSignalService:
-    global _service
-    if _service is None:
-        _service = LeadershipSignalService()
-    return _service
+get_leadership_service = make_singleton_factory(LeadershipSignalService)

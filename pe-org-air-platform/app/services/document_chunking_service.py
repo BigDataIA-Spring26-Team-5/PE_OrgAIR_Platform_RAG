@@ -7,6 +7,7 @@ from app.pipelines.chunking import create_chunker, DocumentChunk
 from app.services.s3_storage import get_s3_service
 from app.repositories.document_repository import get_document_repository
 from app.repositories.chunk_repository import get_chunk_repository
+from app.services.utils import make_singleton_factory
 
 logging.basicConfig(
     level=logging.INFO,
@@ -230,11 +231,4 @@ class DocumentChunkingService:
         }
 
 
-# Singleton
-_service: Optional[DocumentChunkingService] = None
-
-def get_document_chunking_service() -> DocumentChunkingService:
-    global _service
-    if _service is None:
-        _service = DocumentChunkingService()
-    return _service
+get_document_chunking_service = make_singleton_factory(DocumentChunkingService)

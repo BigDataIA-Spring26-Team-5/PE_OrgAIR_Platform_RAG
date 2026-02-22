@@ -9,11 +9,10 @@ from datetime import datetime, timezone
 from typing import Dict, Optional
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Depends, Query, Request, status
-from fastapi.exceptions import HTTPException, RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi import APIRouter, Depends, Query, status
 
 from app.core.dependencies import get_assessment_repository, get_company_repository
+from app.core.exceptions import raise_error
 from app.models.assessment import (
     AssessmentCreate,
     AssessmentResponse,
@@ -24,148 +23,14 @@ from app.models.assessment import (
 from app.models.enumerations import AssessmentStatus, AssessmentType
 from app.repositories.assessment_repository import AssessmentRepository
 from app.repositories.company_repository import CompanyRepository
-from app.services.cache import get_cache, TTL_ASSESSMENT
+from app.services.cache import get_cache, TTL_ASSESSMENT, invalidate_assessment_cache
 
 router = APIRouter(prefix="/api/v1/assessments", tags=["Assessments"])
 
 
 
 
-#  Custom Exception Handlers 
-# Add these to your main.py: app.add_exception_handler(RequestValidationError, validation_exception_handler)
-
-FIELD_MESSAGES = {
-    "company_id": {
-        "missing": "Company ID is required",
-        "uuid_parsing": "Company ID must be a valid UUID format",
-        "uuid_type": "Company ID must be a valid UUID",
-    },
-    "assessment_type": {
-        "missing": "Assessment type is required",
-        "enum": "Assessment type must be one of: screening, due_diligence, quarterly, exit_prep",
-    },
-    "assessment_date": {
-        "missing": "Assessment date is required",
-        "date_parsing": "Assessment date must be a valid date format (YYYY-MM-DD)",
-        "date_type": "Assessment date must be a valid date",
-    },
-    "assessment_id": {
-        "uuid_parsing": "Assessment ID must be a valid UUID format",
-        "uuid_type": "Assessment ID must be a valid UUID",
-    },
-    "status": {
-        "missing": "Status is required",
-        "enum": "Status must be one of: draft, in_progress, submitted, approved, superseded",
-    },
-    "primary_assessor": {
-        "string_too_long": "Primary assessor name must not exceed 255 characters",
-        "string_type": "Primary assessor must be a string",
-    },
-    "secondary_assessor": {
-        "string_too_long": "Secondary assessor name must not exceed 255 characters",
-        "string_type": "Secondary assessor must be a string",
-    },
-    "page": {
-        "greater_than_equal": "Page must be greater than or equal to 1",
-        "int_type": "Page must be an integer",
-        "int_parsing": "Page must be a valid integer",
-    },
-    "page_size": {
-        "greater_than_equal": "Page size must be greater than or equal to 1",
-        "less_than_equal": "Page size must not exceed 100",
-        "int_type": "Page size must be an integer",
-        "int_parsing": "Page size must be a valid integer",
-    },
-}
-
-DEFAULT_MESSAGES = {
-    "missing": "Field '{field}' is required",
-    "string_too_short": "Field '{field}' is too short",
-    "string_too_long": "Field '{field}' is too long",
-    "string_pattern_mismatch": "Field '{field}' has invalid format",
-    "less_than_equal": "Field '{field}' exceeds maximum allowed value",
-    "greater_than_equal": "Field '{field}' is below minimum allowed value",
-    "uuid_parsing": "Field '{field}' must be a valid UUID",
-    "uuid_type": "Field '{field}' must be a valid UUID",
-    "string_type": "Field '{field}' must be a string",
-    "date_parsing": "Field '{field}' must be a valid date",
-    "date_type": "Field '{field}' must be a valid date",
-    "int_type": "Field '{field}' must be an integer",
-    "int_parsing": "Field '{field}' must be a valid integer",
-    "enum": "Field '{field}' has an invalid value",
-    "json_invalid": "Malformed JSON request body",
-    "extra_forbidden": "Unknown field '{field}' is not allowed",
-}
-
-
-def get_validation_message(field: str, error_type: str) -> str:
-    if field in FIELD_MESSAGES:
-        field_msgs = FIELD_MESSAGES[field]
-        for key in field_msgs:
-            if key in error_type:
-                return field_msgs[key]
-
-    for key, template in DEFAULT_MESSAGES.items():
-        if key in error_type:
-            return template.format(field=field)
-
-    return f"Invalid value for field '{field}'"
-
-
-async def validation_exception_handler(request: Request, exc: RequestValidationError):
-    errors = exc.errors()
-
-    if not errors:
-        return JSONResponse(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            content={
-                "error_code": "VALIDATION_ERROR",
-                "message": "Request validation failed",
-                "details": None,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-            },
-        )
-
-    err = errors[0]
-    error_type = err.get("type", "")
-    loc = err.get("loc", [])
-
-    if "json_invalid" in error_type:
-        return JSONResponse(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            content={
-                "error_code": "INVALID_REQUEST",
-                "message": "Malformed JSON request body",
-                "details": None,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-            },
-        )
-
-    field = ".".join(str(l) for l in loc if l != "body")
-    message = get_validation_message(field, error_type)
-
-    return JSONResponse(
-        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-        content={
-            "error_code": "VALIDATION_ERROR",
-            "message": message,
-            "details": {"field": field, "type": error_type} if field else None,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        },
-    )
-
-
-#  Exception Helpers 
-
-def raise_error(status_code: int, error_code: str, message: str):
-    raise HTTPException(
-        status_code=status_code,
-        detail=ErrorResponse(
-            error_code=error_code,
-            message=message,
-            timestamp=datetime.now(timezone.utc)
-        ).model_dump(mode="json")
-    )
+#  Exception Helpers
 
 
 def raise_bad_request(msg: str = "Malformed JSON request"):
@@ -188,17 +53,7 @@ def raise_internal_error():
     raise_error(status.HTTP_500_INTERNAL_SERVER_ERROR, "INTERNAL_SERVER_ERROR", "Unexpected server error")
 
 
-def invalidate_assessment_cache(assessment_id: UUID):
-    """Invalidate assessment cache entries in Redis."""
-    cache = get_cache()
-    if cache:
-        try:
-            cache.delete(f"assessment:{assessment_id}")
-        except Exception:
-            pass  # Log error but don't fail the request
-
-
-#  Routes 
+#  Routes
 
 @router.post(
     "",

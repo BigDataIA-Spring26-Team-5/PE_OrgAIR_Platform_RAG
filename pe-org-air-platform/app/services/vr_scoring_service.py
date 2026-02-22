@@ -1,4 +1,5 @@
 # app/services/vr_scoring_service.py
+from app.services.utils import make_singleton_factory
 """
 VR Scoring Service — CS3 Task 5.0e + 5.2 integration
 ------------------------------------------------------
@@ -177,11 +178,4 @@ class VRScoringService:
 # Singleton accessor
 # ---------------------------------------------------------------------------
 
-_service: Optional[VRScoringService] = None
-
-
-def get_vr_scoring_service() -> VRScoringService:
-    global _service
-    if _service is None:
-        _service = VRScoringService()
-    return _service
+get_vr_scoring_service = make_singleton_factory(VRScoringService)

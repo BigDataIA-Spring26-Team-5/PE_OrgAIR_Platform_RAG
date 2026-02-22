@@ -12,6 +12,7 @@ from app.models.document import (
     DocumentMetadata,
     DocumentStatus
 )
+from app.services.utils import make_singleton_factory
 
 # Configure logging to show in terminal
 logging.basicConfig(
@@ -176,11 +177,4 @@ class DocumentCollectorService:
         return results
 
 
-# Singleton
-_service: Optional[DocumentCollectorService] = None
-
-def get_document_collector_service() -> DocumentCollectorService:
-    global _service
-    if _service is None:
-        _service = DocumentCollectorService()
-    return _service
+get_document_collector_service = make_singleton_factory(DocumentCollectorService)

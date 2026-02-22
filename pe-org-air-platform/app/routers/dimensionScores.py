@@ -16,7 +16,7 @@ from app.models.dimension import (
 )
 from app.models.enumerations import Dimension
 from app.repositories.dimension_score_repository import DimensionScoreRepository
-from app.services.cache import get_cache, TTL_ASSESSMENT, TTL_DIMENSION_WEIGHTS
+from app.services.cache import get_cache, TTL_ASSESSMENT, TTL_DIMENSION_WEIGHTS, invalidate_assessment_cache
 
 
 # ROUTER CONFIGURATION
@@ -331,15 +331,6 @@ def validate_weights_sum_to_one():
 # Validate weights sum to 1.0 at module load time
 validate_weights_sum_to_one()
 
-
-def invalidate_assessment_cache(assessment_id: UUID):
-    """Invalidate assessment cache when scores are modified."""
-    cache = get_cache()
-    if cache:
-        try:
-            cache.delete(f"assessment:{assessment_id}")
-        except Exception:
-            pass  # Log error but don't fail the request
 
 
 

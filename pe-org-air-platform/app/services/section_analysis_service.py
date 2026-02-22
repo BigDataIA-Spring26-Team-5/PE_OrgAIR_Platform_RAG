@@ -6,6 +6,7 @@ from dataclasses import asdict
 from app.pipelines.section_analyzer import get_section_analyzer, DocumentAnalysis
 from app.services.s3_storage import get_s3_service
 from app.repositories.document_repository import get_document_repository
+from app.services.utils import make_singleton_factory
 
 logging.basicConfig(
     level=logging.INFO,
@@ -365,11 +366,4 @@ class SectionAnalysisService:
         return "\n".join(md)
 
 
-# Singleton
-_service: Optional[SectionAnalysisService] = None
-
-def get_section_analysis_service() -> SectionAnalysisService:
-    global _service
-    if _service is None:
-        _service = SectionAnalysisService()
-    return _service
+get_section_analysis_service = make_singleton_factory(SectionAnalysisService)

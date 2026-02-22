@@ -6,7 +6,7 @@ from fastapi.exceptions import RequestValidationError
 
 # IMPORT ROUTERS
 from app.routers.companies import router as companies_router
-from app.routers.companies import validation_exception_handler
+from app.core.exceptions import validation_exception_handler
 from app.routers.industries import router as industries_router
 from app.routers.health import router as health_router
 from app.routers.assessments import router as assessments_router

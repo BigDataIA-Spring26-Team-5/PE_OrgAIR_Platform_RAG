@@ -653,27 +653,16 @@ class PortfolioPFScoringResponse(BaseModel):
 
 def _fetch_pf_row(ticker: str) -> Optional[PFScoringRecord]:
     """Read pf column from the Snowflake SCORING table for one ticker."""
-    from app.services.snowflake import get_snowflake_connection
-    from snowflake.connector import DictCursor
-    conn = get_snowflake_connection()
-    try:
-        cursor = conn.cursor(DictCursor)
-        cursor.execute(
-            "SELECT ticker, pf, scored_at, updated_at FROM SCORING WHERE ticker = %s",
-            [ticker.upper()],
-        )
-        row = cursor.fetchone()
-        cursor.close()
-        if not row:
-            return None
-        return PFScoringRecord(
-            ticker=row["TICKER"],
-            pf=row.get("PF"),
-            scored_at=str(row["SCORED_AT"]) if row.get("SCORED_AT") else None,
-            updated_at=str(row["UPDATED_AT"]) if row.get("UPDATED_AT") else None,
-        )
-    finally:
-        conn.close()
+    from app.repositories.scoring_read_repository import get_scoring_read_repo
+    row = get_scoring_read_repo().fetch_pf_row(ticker)
+    if not row:
+        return None
+    return PFScoringRecord(
+        ticker=row["TICKER"],
+        pf=row.get("PF"),
+        scored_at=str(row["SCORED_AT"]) if row.get("SCORED_AT") else None,
+        updated_at=str(row["UPDATED_AT"]) if row.get("UPDATED_AT") else None,
+    )
 
 
 # =====================================================================

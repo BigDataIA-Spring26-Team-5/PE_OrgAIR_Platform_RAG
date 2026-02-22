@@ -21,6 +21,7 @@ from typing import Dict, List, Optional, Any
 from datetime import datetime, timezone
 
 from app.scoring.evidence_mapper import (
+from app.services.utils import make_singleton_factory
     EvidenceMapper, EvidenceScore, SignalSource, Dimension,
 )
 from app.scoring.rubric_scorer import RubricScorer
@@ -569,11 +570,4 @@ class ScoringService:
             return []
 
 
-# Singleton
-_service: Optional[ScoringService] = None
-
-def get_scoring_service() -> ScoringService:
-    global _service
-    if _service is None:
-        _service = ScoringService()
-    return _service
+get_scoring_service = make_singleton_factory(ScoringService)

@@ -21,6 +21,7 @@ from app.pipelines.job_signals import (
     step3_classify_ai_jobs,
     step4_score_job_market,
 )
+from app.services.utils import make_singleton_factory
 from app.pipelines.signal_pipeline_state import SignalPipelineState
 from app.services.s3_storage import get_s3_service
 from app.repositories.company_repository import CompanyRepository
@@ -204,12 +205,4 @@ class JobDataService:
             logger.info("Cleared all job data cache")
 
 
-# Singleton
-_service: Optional[JobDataService] = None
-
-
-def get_job_data_service() -> JobDataService:
-    global _service
-    if _service is None:
-        _service = JobDataService()
-    return _service
+get_job_data_service = make_singleton_factory(JobDataService)

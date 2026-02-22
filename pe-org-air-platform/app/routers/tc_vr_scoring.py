@@ -960,31 +960,19 @@ class PortfolioScoringResponse(BaseModel):
 
 def _fetch_scoring_row(ticker: str) -> Optional[ScoringRecord]:
     """Read one row from the Snowflake SCORING table."""
-    from app.services.snowflake import get_snowflake_connection
-    from snowflake.connector import DictCursor
-    conn = get_snowflake_connection()
-    try:
-        cursor = conn.cursor(DictCursor)
-        cursor.execute(
-            "SELECT ticker, tc, vr, pf, hr, scored_at, updated_at "
-            "FROM SCORING WHERE ticker = %s",
-            [ticker.upper()],
-        )
-        row = cursor.fetchone()
-        cursor.close()
-        if not row:
-            return None
-        return ScoringRecord(
-            ticker=row["TICKER"],
-            tc=row.get("TC"),
-            vr=row.get("VR"),
-            pf=row.get("PF"),
-            hr=row.get("HR"),
-            scored_at=str(row["SCORED_AT"]) if row.get("SCORED_AT") else None,
-            updated_at=str(row["UPDATED_AT"]) if row.get("UPDATED_AT") else None,
-        )
-    finally:
-        conn.close()
+    from app.repositories.scoring_read_repository import get_scoring_read_repo
+    row = get_scoring_read_repo().fetch_tc_vr_row(ticker)
+    if not row:
+        return None
+    return ScoringRecord(
+        ticker=row["TICKER"],
+        tc=row.get("TC"),
+        vr=row.get("VR"),
+        pf=row.get("PF"),
+        hr=row.get("HR"),
+        scored_at=str(row["SCORED_AT"]) if row.get("SCORED_AT") else None,
+        updated_at=str(row["UPDATED_AT"]) if row.get("UPDATED_AT") else None,
+    )
 
 
 # =====================================================================

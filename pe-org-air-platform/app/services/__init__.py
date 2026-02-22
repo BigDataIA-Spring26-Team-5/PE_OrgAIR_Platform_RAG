@@ -62,11 +62,6 @@ def get_patent_signal_service():
     return _get()
 
 
-# Lazy import for SignalsStorage classes
-def _get_signals_storage_classes():
-    from app.services.signals_storage import SignalsStorage, S3SignalsStorage
-    return SignalsStorage, S3SignalsStorage
-
 
 __all__ = [
     # Core services
