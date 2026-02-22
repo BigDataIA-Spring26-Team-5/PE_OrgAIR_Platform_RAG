@@ -331,6 +331,36 @@ class ScoringRepository:
         finally:
             cur.close()
 
+    def upsert_culture_mapping(self, ticker: str, signal_data: dict) -> bool:
+        """
+        Upsert the glassdoor_reviews row into signal_dimension_mapping.
+
+        CS3 Table 1 fixed weights for glassdoor_reviews:
+          talent_skills = 0.10, leadership_vision = 0.10, culture_change = 0.80
+        """
+        try:
+            overall = signal_data.get("overall_score", 0)
+            confidence = signal_data.get("confidence", 0)
+            review_count = signal_data.get("review_count", 0)
+            self.upsert_mapping_row(
+                ticker=ticker.upper(),
+                source="glassdoor_reviews",
+                raw_score=float(overall) if overall else None,
+                confidence=float(confidence) if confidence else None,
+                evidence_count=int(review_count),
+                data_infrastructure=None,
+                ai_governance=None,
+                technology_stack=None,
+                talent_skills=0.100,
+                leadership_vision=0.100,
+                use_case_portfolio=None,
+                culture_change=0.800,
+            )
+            return True
+        except Exception as e:
+            logger.error(f"[{ticker}] upsert_culture_mapping failed: {e}", exc_info=True)
+            return False
+
 
 # Singleton
 _repo: Optional[ScoringRepository] = None

@@ -21,6 +21,8 @@ import time
 from fastapi.responses import StreamingResponse
 import io
 
+from app.repositories.composite_scoring_repository import get_composite_scoring_repo
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/scoring", tags=["CS3 H^R (Human Readiness)"])
@@ -502,100 +504,29 @@ def _save_hr_result(result: HRResponse) -> None:
         logger.warning(f"[{ticker}] S3 save failed (non-fatal): {e}")
 
     try:
-        _upsert_scoring_hr(ticker, hr=result.hr_score)
+        get_composite_scoring_repo().upsert_scoring_hr(ticker, result.hr_score)
         logger.info(f"[{ticker}] SCORING table upserted: HR={result.hr_score}")
     except Exception as e:
         logger.warning(f"[{ticker}] Snowflake SCORING upsert failed (non-fatal): {e}")
 
     # HR_SCORING — breakdown detail table
     try:
-        _upsert_hr_scoring(result)
+        bd = result.hr_breakdown
+        val = result.validation
+        get_composite_scoring_repo().upsert_hr_result(
+            ticker,
+            hr_score=result.hr_score,
+            hr_base=bd.hr_base if bd else None,
+            position_factor_used=bd.position_factor if bd else None,
+            position_adjustment=bd.position_adjustment if bd else None,
+            sector=bd.sector if bd else None,
+            interpretation=bd.interpretation if bd else None,
+            hr_in_range=val.hr_in_range if val else None,
+            hr_expected=val.hr_expected if val else None,
+        )
         logger.info(f"[{ticker}] HR_SCORING table upserted")
     except Exception as e:
         logger.warning(f"[{ticker}] HR_SCORING upsert failed (non-fatal): {e}")
-
-
-def _upsert_hr_scoring(result: HRResponse) -> None:
-    """MERGE all H^R sub-components into HR_SCORING."""
-    from app.services.snowflake import get_snowflake_connection
-    ticker = result.ticker
-    bd  = result.hr_breakdown
-    val = result.validation
-
-    hr_score             = result.hr_score
-    hr_base              = bd.hr_base            if bd else None
-    position_factor_used = bd.position_factor    if bd else None
-    position_adjustment  = bd.position_adjustment if bd else None
-    sector               = bd.sector             if bd else None
-    interpretation       = bd.interpretation     if bd else None
-    hr_in_range          = val.hr_in_range       if val else None
-    hr_expected          = val.hr_expected       if val else None
-
-    conn = get_snowflake_connection()
-    try:
-        cursor = conn.cursor()
-        sql = """
-            MERGE INTO HR_SCORING AS tgt
-            USING (SELECT %s AS ticker) AS src
-            ON tgt.ticker = src.ticker
-            WHEN MATCHED THEN UPDATE SET
-                hr_score             = %s,
-                hr_base              = %s,
-                position_factor_used = %s,
-                position_adjustment  = %s,
-                sector               = %s,
-                interpretation       = %s,
-                hr_in_range          = %s,
-                hr_expected          = %s,
-                updated_at           = CURRENT_TIMESTAMP()
-            WHEN NOT MATCHED THEN INSERT (
-                ticker, hr_score, hr_base, position_factor_used, position_adjustment,
-                sector, interpretation, hr_in_range, hr_expected, scored_at, updated_at
-            ) VALUES (
-                %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP()
-            )
-        """
-        params = [
-            # USING clause
-            ticker,
-            # UPDATE SET
-            hr_score, hr_base, position_factor_used, position_adjustment,
-            sector, interpretation, hr_in_range, hr_expected,
-            # INSERT VALUES
-            ticker, hr_score, hr_base, position_factor_used, position_adjustment,
-            sector, interpretation, hr_in_range, hr_expected,
-        ]
-        cursor.execute(sql, params)
-        conn.commit()
-        cursor.close()
-    finally:
-        conn.close()
-
-
-def _upsert_scoring_hr(ticker: str, hr: Optional[float]) -> None:
-    """MERGE INTO SCORING — updates only the hr column, preserving existing tc/vr/pf."""
-    from app.services.snowflake import get_snowflake_connection
-    conn = get_snowflake_connection()
-    try:
-        cursor = conn.cursor()
-        sql = """
-            MERGE INTO SCORING AS tgt
-            USING (SELECT %s AS ticker) AS src
-            ON tgt.ticker = src.ticker
-            WHEN MATCHED THEN UPDATE SET
-                hr         = %s,
-                updated_at = CURRENT_TIMESTAMP()
-            WHEN NOT MATCHED THEN INSERT
-                (ticker, hr, scored_at, updated_at)
-            VALUES
-                (%s, %s, CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP())
-        """
-        cursor.execute(sql, [ticker, hr, ticker, hr])
-        conn.commit()
-        cursor.close()
-    finally:
-        conn.close()
 
 
 # =====================================================================
@@ -619,8 +550,7 @@ class PortfolioHRScoringResponse(BaseModel):
 
 def _fetch_hr_row(ticker: str) -> Optional[HRScoringRecord]:
     """Read hr column from the Snowflake SCORING table for one ticker."""
-    from app.repositories.scoring_read_repository import get_scoring_read_repo
-    row = get_scoring_read_repo().fetch_hr_row(ticker)
+    row = get_composite_scoring_repo().fetch_hr_row(ticker)
     if not row:
         return None
     return HRScoringRecord(

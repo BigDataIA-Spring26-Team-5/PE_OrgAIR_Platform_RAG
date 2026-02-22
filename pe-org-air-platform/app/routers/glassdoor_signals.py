@@ -153,40 +153,12 @@ def _load_latest_raw_json(ticker: str) -> tuple[Optional[Dict], Optional[str]]:
     return None, None
 
 def _upsert_culture_to_snowflake(ticker: str, signal_data: Dict) -> bool:
-    """
-    Upsert the glassdoor_reviews row into signal_dimension_mapping in Snowflake.
-
-    CS3 Table 1 weights for glassdoor_reviews:
-      talent_skills = 0.10, leadership_vision = 0.10, culture_change = 0.80
-    """
-    try:
-        from app.repositories.scoring_repository import get_scoring_repository
-        repo = get_scoring_repository()
-
-        overall = signal_data.get("overall_score", 0)
-        confidence = signal_data.get("confidence", 0)
-        review_count = signal_data.get("review_count", 0)
-
-        repo.upsert_mapping_row(
-            ticker=ticker.upper(),
-            source="glassdoor_reviews",
-            raw_score=float(overall) if overall else None,
-            confidence=float(confidence) if confidence else None,
-            evidence_count=int(review_count),
-            data_infrastructure=None,
-            ai_governance=None,
-            technology_stack=None,
-            talent_skills=0.100,
-            leadership_vision=0.100,
-            use_case_portfolio=None,
-            culture_change=0.800,
-        )
+    """Upsert glassdoor_reviews into signal_dimension_mapping via ScoringRepository."""
+    from app.repositories.scoring_repository import get_scoring_repository
+    result = get_scoring_repository().upsert_culture_mapping(ticker, signal_data)
+    if result:
         logger.info(f"[{ticker}] Upserted glassdoor_reviews to Snowflake signal_dimension_mapping")
-        return True
-
-    except Exception as e:
-        logger.error(f"[{ticker}] Snowflake upsert failed: {e}", exc_info=True)
-        return False
+    return result
 
 # =====================================================================
 # POST /api/v1/glassdoor-signals/{ticker} — Collect + save to S3 + Snowflake

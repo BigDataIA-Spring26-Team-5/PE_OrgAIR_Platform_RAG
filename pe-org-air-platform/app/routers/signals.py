@@ -18,14 +18,12 @@
 # """
 
 import logging
-import os
 import time
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
-import boto3
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
 from pydantic import BaseModel, Field
 
@@ -44,45 +42,6 @@ logger = logging.getLogger(__name__)
 
 # In-memory task status store (in production, use Redis or database)
 _task_store: Dict[str, Dict[str, Any]] = {}
-
-# S3 config
-AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID", "")
-AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY", "")
-AWS_REGION = os.getenv("AWS_REGION", "us-east-2")
-S3_BUCKET = os.getenv("S3_BUCKET", "pe-orgair-platform-group5")
-
-
-# =============================================================================
-# S3 Helpers
-# =============================================================================
-
-def get_s3_client():
-    return boto3.client(
-        "s3",
-        aws_access_key_id=AWS_ACCESS_KEY_ID,
-        aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
-        region_name=AWS_REGION,
-    )
-
-
-def delete_s3_prefix(prefix: str) -> int:
-    """Delete all S3 objects under a given prefix. Returns count deleted."""
-    s3 = get_s3_client()
-    deleted_count = 0
-    try:
-        paginator = s3.get_paginator("list_objects_v2")
-        for page in paginator.paginate(Bucket=S3_BUCKET, Prefix=prefix):
-            objects = page.get("Contents", [])
-            if not objects:
-                continue
-            delete_keys = [{"Key": obj["Key"]} for obj in objects]
-            s3.delete_objects(Bucket=S3_BUCKET, Delete={"Objects": delete_keys})
-            deleted_count += len(delete_keys)
-            logger.info(f"Deleted {len(delete_keys)} S3 objects under prefix '{prefix}'")
-    except Exception as e:
-        logger.error(f"Error deleting S3 prefix '{prefix}': {e}")
-    return deleted_count
-
 
 # =============================================================================
 # Enums & Models
@@ -220,7 +179,7 @@ async def reset_all_signals():
     # S3: delete all signal-related files
     s3_deleted = 0
     for prefix in ["signals/", "sec/signals/"]:
-        s3_deleted += delete_s3_prefix(prefix)
+        s3_deleted += get_s3_service().delete_prefix(prefix)
 
     logger.info(f"Reset all signals: snowflake={snowflake_deleted}, summaries={summary_deleted}, s3={s3_deleted}")
     return {
@@ -314,7 +273,7 @@ async def reset_signals_by_category(ticker: str, category: str):
     # S3
     s3_deleted = 0
     for prefix in [f"signals/{ticker}/{category}/", f"sec/signals/{ticker}/{category}/"]:
-        s3_deleted += delete_s3_prefix(prefix)
+        s3_deleted += get_s3_service().delete_prefix(prefix)
 
     logger.info(f"Reset {category} signals for {ticker}: snowflake={snowflake_deleted}, s3={s3_deleted}")
     return {

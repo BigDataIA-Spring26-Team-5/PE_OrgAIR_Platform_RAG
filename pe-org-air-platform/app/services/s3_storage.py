@@ -113,6 +113,26 @@ class S3StorageService:
             logger.error(f"Failed to delete file from S3: {e}")
             return False
 
+    def delete_prefix(self, prefix: str) -> int:
+        """Delete all S3 objects under a given prefix. Returns count deleted."""
+        deleted_count = 0
+        try:
+            paginator = self.s3_client.get_paginator("list_objects_v2")
+            for page in paginator.paginate(Bucket=self.bucket_name, Prefix=prefix):
+                objects = page.get("Contents", [])
+                if not objects:
+                    continue
+                delete_keys = [{"Key": obj["Key"]} for obj in objects]
+                self.s3_client.delete_objects(
+                    Bucket=self.bucket_name,
+                    Delete={"Objects": delete_keys},
+                )
+                deleted_count += len(delete_keys)
+                logger.info(f"Deleted {len(delete_keys)} S3 objects under prefix '{prefix}'")
+        except Exception as e:
+            logger.error(f"Error deleting S3 prefix '{prefix}': {e}")
+        return deleted_count
+
     def list_files(self, prefix: str) -> list:
         """List files in S3 with given prefix"""
         try:

@@ -21,6 +21,8 @@ import time
 from fastapi.responses import StreamingResponse
 import io
 
+from app.repositories.composite_scoring_repository import get_composite_scoring_repo
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/scoring", tags=["CS3 TC + V^R Scoring"])
@@ -726,214 +728,62 @@ def _save_tc_vr_result(result: TCVRResponse) -> None:
     try:
         tc = result.talent_concentration
         vr = result.vr_result.vr_score if result.vr_result else None
-        _upsert_scoring_table(ticker, tc=tc, vr=vr)
+        get_composite_scoring_repo().upsert_scoring_table(ticker, tc=tc, vr=vr)
         logger.info(f"[{ticker}] SCORING table upserted: TC={tc}, VR={vr}")
     except Exception as e:
         logger.warning(f"[{ticker}] Snowflake SCORING upsert failed (non-fatal): {e}")
 
     # TC_SCORING — breakdown detail table
     try:
-        _upsert_tc_scoring(result)
+        bd = result.tc_breakdown
+        ja = result.job_analysis
+        val = result.validation
+        get_composite_scoring_repo().upsert_tc_result(
+            ticker,
+            tc=result.talent_concentration,
+            leadership_ratio=bd.leadership_ratio if bd else None,
+            team_size_factor=bd.team_size_factor if bd else None,
+            skill_concentration=bd.skill_concentration if bd else None,
+            individual_factor=bd.individual_factor if bd else None,
+            total_ai_jobs=ja.total_ai_jobs if ja else None,
+            senior_ai_jobs=ja.senior_ai_jobs if ja else None,
+            mid_ai_jobs=ja.mid_ai_jobs if ja else None,
+            entry_ai_jobs=ja.entry_ai_jobs if ja else None,
+            unique_skills_cnt=len(ja.unique_skills) if ja else None,
+            individual_mentions=result.individual_mentions,
+            review_count=result.review_count,
+            ai_mentions=result.ai_mentions,
+            tc_in_range=val.tc_in_range if val else None,
+            tc_expected=val.tc_expected if val else None,
+        )
         logger.info(f"[{ticker}] TC_SCORING table upserted")
     except Exception as e:
         logger.warning(f"[{ticker}] TC_SCORING upsert failed (non-fatal): {e}")
 
     # VR_SCORING — breakdown detail table
     try:
-        _upsert_vr_scoring(result)
+        vr_r = result.vr_result
+        val = result.validation
+        dims = result.dimension_scores or {}
+        get_composite_scoring_repo().upsert_vr_result(
+            ticker,
+            vr_score=vr_r.vr_score if vr_r else None,
+            weighted_dim_score=vr_r.weighted_dim_score if vr_r else None,
+            talent_risk_adj=vr_r.talent_risk_adj if vr_r else None,
+            tc_used=result.talent_concentration,
+            dim_data_infra=dims.get("data_infrastructure"),
+            dim_ai_gov=dims.get("ai_governance"),
+            dim_tech_stack=dims.get("technology_stack"),
+            dim_talent=dims.get("talent_skills"),
+            dim_leadership=dims.get("leadership_vision"),
+            dim_use_case=dims.get("use_case_portfolio"),
+            dim_culture=dims.get("culture_change"),
+            vr_in_range=val.vr_in_range if val else None,
+            vr_expected=val.vr_expected if val else None,
+        )
         logger.info(f"[{ticker}] VR_SCORING table upserted")
     except Exception as e:
         logger.warning(f"[{ticker}] VR_SCORING upsert failed (non-fatal): {e}")
-
-
-def _upsert_tc_scoring(result: TCVRResponse) -> None:
-    """MERGE all TC sub-components into TC_SCORING."""
-    from app.services.snowflake import get_snowflake_connection
-    ticker = result.ticker
-    tc = result.talent_concentration
-    bd = result.tc_breakdown
-    ja = result.job_analysis
-    val = result.validation
-
-    leadership_ratio    = bd.leadership_ratio    if bd else None
-    team_size_factor    = bd.team_size_factor    if bd else None
-    skill_concentration = bd.skill_concentration if bd else None
-    individual_factor   = bd.individual_factor   if bd else None
-
-    total_ai_jobs     = ja.total_ai_jobs         if ja else None
-    senior_ai_jobs    = ja.senior_ai_jobs        if ja else None
-    mid_ai_jobs       = ja.mid_ai_jobs           if ja else None
-    entry_ai_jobs     = ja.entry_ai_jobs         if ja else None
-    unique_skills_cnt = len(ja.unique_skills)    if ja else None
-
-    individual_mentions = result.individual_mentions
-    review_count        = result.review_count
-    ai_mentions         = result.ai_mentions
-
-    tc_in_range = val.tc_in_range if val else None
-    tc_expected = val.tc_expected if val else None
-
-    conn = get_snowflake_connection()
-    try:
-        cursor = conn.cursor()
-        sql = """
-            MERGE INTO TC_SCORING AS tgt
-            USING (SELECT %s AS ticker) AS src
-            ON tgt.ticker = src.ticker
-            WHEN MATCHED THEN UPDATE SET
-                talent_concentration  = %s,
-                leadership_ratio      = %s,
-                team_size_factor      = %s,
-                skill_concentration   = %s,
-                individual_factor     = %s,
-                total_ai_jobs         = %s,
-                senior_ai_jobs        = %s,
-                mid_ai_jobs           = %s,
-                entry_ai_jobs         = %s,
-                unique_skills_count   = %s,
-                individual_mentions   = %s,
-                review_count          = %s,
-                ai_mentions           = %s,
-                tc_in_range           = %s,
-                tc_expected           = %s,
-                updated_at            = CURRENT_TIMESTAMP()
-            WHEN NOT MATCHED THEN INSERT (
-                ticker, talent_concentration, leadership_ratio, team_size_factor,
-                skill_concentration, individual_factor, total_ai_jobs, senior_ai_jobs,
-                mid_ai_jobs, entry_ai_jobs, unique_skills_count, individual_mentions,
-                review_count, ai_mentions, tc_in_range, tc_expected, scored_at, updated_at
-            ) VALUES (
-                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP()
-            )
-        """
-        params = [
-            # USING clause
-            ticker,
-            # UPDATE SET
-            tc, leadership_ratio, team_size_factor, skill_concentration, individual_factor,
-            total_ai_jobs, senior_ai_jobs, mid_ai_jobs, entry_ai_jobs, unique_skills_cnt,
-            individual_mentions, review_count, ai_mentions, tc_in_range, tc_expected,
-            # INSERT VALUES
-            ticker, tc, leadership_ratio, team_size_factor, skill_concentration,
-            individual_factor, total_ai_jobs, senior_ai_jobs, mid_ai_jobs, entry_ai_jobs,
-            unique_skills_cnt, individual_mentions, review_count, ai_mentions,
-            tc_in_range, tc_expected,
-        ]
-        cursor.execute(sql, params)
-        conn.commit()
-        cursor.close()
-    finally:
-        conn.close()
-
-
-def _upsert_vr_scoring(result: TCVRResponse) -> None:
-    """MERGE all VR sub-components into VR_SCORING."""
-    from app.services.snowflake import get_snowflake_connection
-    ticker = result.ticker
-    vr_r   = result.vr_result
-    val    = result.validation
-    dims   = result.dimension_scores or {}
-
-    vr_score          = vr_r.vr_score          if vr_r else None
-    weighted_dim_score= vr_r.weighted_dim_score if vr_r else None
-    talent_risk_adj   = vr_r.talent_risk_adj    if vr_r else None
-    tc_used           = result.talent_concentration
-
-    dim_data_infra    = dims.get("data_infrastructure")
-    dim_ai_gov        = dims.get("ai_governance")
-    dim_tech_stack    = dims.get("technology_stack")
-    dim_talent        = dims.get("talent_skills")
-    dim_leadership    = dims.get("leadership_vision")
-    dim_use_case      = dims.get("use_case_portfolio")
-    dim_culture       = dims.get("culture_change")
-
-    vr_in_range = val.vr_in_range if val else None
-    vr_expected = val.vr_expected if val else None
-
-    conn = get_snowflake_connection()
-    try:
-        cursor = conn.cursor()
-        sql = """
-            MERGE INTO VR_SCORING AS tgt
-            USING (SELECT %s AS ticker) AS src
-            ON tgt.ticker = src.ticker
-            WHEN MATCHED THEN UPDATE SET
-                vr_score                = %s,
-                weighted_dim_score      = %s,
-                talent_risk_adj         = %s,
-                tc_used                 = %s,
-                dim_data_infrastructure = %s,
-                dim_ai_governance       = %s,
-                dim_technology_stack    = %s,
-                dim_talent_skills       = %s,
-                dim_leadership_vision   = %s,
-                dim_use_case_portfolio  = %s,
-                dim_culture_change      = %s,
-                vr_in_range             = %s,
-                vr_expected             = %s,
-                updated_at              = CURRENT_TIMESTAMP()
-            WHEN NOT MATCHED THEN INSERT (
-                ticker, vr_score, weighted_dim_score, talent_risk_adj, tc_used,
-                dim_data_infrastructure, dim_ai_governance, dim_technology_stack,
-                dim_talent_skills, dim_leadership_vision, dim_use_case_portfolio,
-                dim_culture_change, vr_in_range, vr_expected, scored_at, updated_at
-            ) VALUES (
-                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP()
-            )
-        """
-        params = [
-            # USING clause
-            ticker,
-            # UPDATE SET
-            vr_score, weighted_dim_score, talent_risk_adj, tc_used,
-            dim_data_infra, dim_ai_gov, dim_tech_stack, dim_talent,
-            dim_leadership, dim_use_case, dim_culture, vr_in_range, vr_expected,
-            # INSERT VALUES
-            ticker, vr_score, weighted_dim_score, talent_risk_adj, tc_used,
-            dim_data_infra, dim_ai_gov, dim_tech_stack, dim_talent,
-            dim_leadership, dim_use_case, dim_culture, vr_in_range, vr_expected,
-        ]
-        cursor.execute(sql, params)
-        conn.commit()
-        cursor.close()
-    finally:
-        conn.close()
-
-
-def _upsert_scoring_table(
-    ticker: str,
-    tc: Optional[float] = None,
-    vr: Optional[float] = None,
-    pf: Optional[float] = None,
-    hr: Optional[float] = None,
-) -> None:
-    """MERGE INTO SCORING — updates only the provided columns, preserving existing values."""
-    from app.services.snowflake import get_snowflake_connection
-    conn = get_snowflake_connection()
-    try:
-        cursor = conn.cursor()
-        sql = """
-            MERGE INTO SCORING AS tgt
-            USING (SELECT %s AS ticker) AS src
-            ON tgt.ticker = src.ticker
-            WHEN MATCHED THEN UPDATE SET
-                tc         = COALESCE(%s, tgt.tc),
-                vr         = COALESCE(%s, tgt.vr),
-                pf         = COALESCE(%s, tgt.pf),
-                hr         = COALESCE(%s, tgt.hr),
-                updated_at = CURRENT_TIMESTAMP()
-            WHEN NOT MATCHED THEN INSERT
-                (ticker, tc, vr, pf, hr, scored_at, updated_at)
-            VALUES
-                (%s, %s, %s, %s, %s, CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP())
-        """
-        cursor.execute(sql, [ticker, tc, vr, pf, hr, ticker, tc, vr, pf, hr])
-        conn.commit()
-        cursor.close()
-    finally:
-        conn.close()
 
 
 # =====================================================================
@@ -960,8 +810,7 @@ class PortfolioScoringResponse(BaseModel):
 
 def _fetch_scoring_row(ticker: str) -> Optional[ScoringRecord]:
     """Read one row from the Snowflake SCORING table."""
-    from app.repositories.scoring_read_repository import get_scoring_read_repo
-    row = get_scoring_read_repo().fetch_tc_vr_row(ticker)
+    row = get_composite_scoring_repo().fetch_tc_vr_row(ticker)
     if not row:
         return None
     return ScoringRecord(

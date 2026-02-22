@@ -19,6 +19,8 @@ import json
 import logging
 import time
 
+from app.repositories.composite_scoring_repository import get_composite_scoring_repo
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/scoring", tags=["CS3 Org-AI-R"])
@@ -581,48 +583,22 @@ def _save_orgair_result(result: OrgAIRResponse) -> None:
         logger.warning(f"[{ticker}] S3 save failed (non-fatal): {e}")
 
     try:
-        _upsert_scoring_orgair(ticker, result)
+        b = result.breakdown
+        if b:
+            ci_lower = b.orgair_ci.ci_lower if b.orgair_ci else None
+            ci_upper = b.orgair_ci.ci_upper if b.orgair_ci else None
+            get_composite_scoring_repo().upsert_orgair_result(
+                ticker,
+                org_air=b.org_air_score,
+                vr_score=b.vr_score,
+                hr_score=b.hr_score,
+                synergy_score=b.synergy_score,
+                ci_lower=ci_lower,
+                ci_upper=ci_upper,
+            )
         logger.info(f"[{ticker}] SCORING table upserted: org_air={result.org_air_score}")
     except Exception as e:
         logger.warning(f"[{ticker}] Snowflake SCORING upsert failed (non-fatal): {e}")
-
-
-def _upsert_scoring_orgair(ticker: str, result: OrgAIRResponse) -> None:
-    from app.services.snowflake import get_snowflake_connection
-
-    if not result.breakdown:
-        return
-
-    b = result.breakdown
-    conn = get_snowflake_connection()
-    try:
-        cursor = conn.cursor()
-        sql = """
-            MERGE INTO SCORING AS tgt
-            USING (SELECT %s AS ticker) AS src
-            ON tgt.ticker = src.ticker
-            WHEN MATCHED THEN UPDATE SET
-                org_air = %s, vr_score = %s, hr_score = %s,
-                synergy_score = %s, ci_lower = %s, ci_upper = %s,
-                updated_at = CURRENT_TIMESTAMP()
-            WHEN NOT MATCHED THEN INSERT
-                (ticker, org_air, vr_score, hr_score, synergy_score,
-                 ci_lower, ci_upper, scored_at, updated_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s,
-                    CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP())
-        """
-        ci_lower = b.orgair_ci.ci_lower if b.orgair_ci else None
-        ci_upper = b.orgair_ci.ci_upper if b.orgair_ci else None
-        cursor.execute(sql, [
-            ticker, b.org_air_score, b.vr_score, b.hr_score,
-            b.synergy_score, ci_lower, ci_upper,
-            ticker, b.org_air_score, b.vr_score, b.hr_score,
-            b.synergy_score, ci_lower, ci_upper,
-        ])
-        conn.commit()
-        cursor.close()
-    finally:
-        conn.close()
 
 
 # =====================================================================
@@ -643,8 +619,7 @@ class PortfolioOrgAIRScoringResponse(BaseModel):
 
 
 def _fetch_orgair_row(ticker: str) -> Optional[OrgAIRScoringRecord]:
-    from app.repositories.scoring_read_repository import get_scoring_read_repo
-    row = get_scoring_read_repo().fetch_orgair_row(ticker)
+    row = get_composite_scoring_repo().fetch_orgair_row(ticker)
     if not row:
         return None
     return OrgAIRScoringRecord(

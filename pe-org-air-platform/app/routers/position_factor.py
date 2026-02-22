@@ -21,6 +21,8 @@ import time
 from fastapi.responses import StreamingResponse
 import io
 
+from app.repositories.composite_scoring_repository import get_composite_scoring_repo
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/scoring", tags=["CS3 Position Factor"])
@@ -529,107 +531,31 @@ def _save_pf_result(result: PFResponse) -> None:
         logger.warning(f"[{ticker}] S3 save failed (non-fatal): {e}")
 
     try:
-        _upsert_scoring_pf(ticker, pf=result.position_factor)
+        get_composite_scoring_repo().upsert_scoring_pf(ticker, result.position_factor)
         logger.info(f"[{ticker}] SCORING table upserted: PF={result.position_factor}")
     except Exception as e:
         logger.warning(f"[{ticker}] Snowflake SCORING upsert failed (non-fatal): {e}")
 
     # PF_SCORING — breakdown detail table
     try:
-        _upsert_pf_scoring(result)
+        bd = result.pf_breakdown
+        val = result.validation
+        get_composite_scoring_repo().upsert_pf_result(
+            ticker,
+            position_factor=result.position_factor,
+            vr_score_used=bd.vr_score if bd else None,
+            sector=COMPANY_SECTORS.get(ticker.upper()),
+            sector_avg_vr=bd.sector_avg_vr if bd else None,
+            vr_diff=bd.vr_diff if bd else None,
+            vr_component=bd.vr_component if bd else None,
+            market_cap_percentile=bd.market_cap_percentile if bd else None,
+            mcap_component=bd.mcap_component if bd else None,
+            pf_in_range=val.pf_in_range if val else None,
+            pf_expected=val.pf_expected if val else None,
+        )
         logger.info(f"[{ticker}] PF_SCORING table upserted")
     except Exception as e:
         logger.warning(f"[{ticker}] PF_SCORING upsert failed (non-fatal): {e}")
-
-
-def _upsert_pf_scoring(result: PFResponse) -> None:
-    """MERGE all PF sub-components into PF_SCORING."""
-    from app.services.snowflake import get_snowflake_connection
-    ticker = result.ticker
-    bd  = result.pf_breakdown
-    val = result.validation
-
-    position_factor       = result.position_factor
-    vr_score_used         = bd.vr_score          if bd else None
-    sector                = COMPANY_SECTORS.get(ticker.upper())
-    sector_avg_vr         = bd.sector_avg_vr     if bd else None
-    vr_diff               = bd.vr_diff           if bd else None
-    vr_component          = bd.vr_component      if bd else None
-    market_cap_percentile = bd.market_cap_percentile if bd else None
-    mcap_component        = bd.mcap_component    if bd else None
-    pf_in_range           = val.pf_in_range      if val else None
-    pf_expected           = val.pf_expected      if val else None
-
-    conn = get_snowflake_connection()
-    try:
-        cursor = conn.cursor()
-        sql = """
-            MERGE INTO PF_SCORING AS tgt
-            USING (SELECT %s AS ticker) AS src
-            ON tgt.ticker = src.ticker
-            WHEN MATCHED THEN UPDATE SET
-                position_factor       = %s,
-                vr_score_used         = %s,
-                sector                = %s,
-                sector_avg_vr         = %s,
-                vr_diff               = %s,
-                vr_component          = %s,
-                market_cap_percentile = %s,
-                mcap_component        = %s,
-                pf_in_range           = %s,
-                pf_expected           = %s,
-                updated_at            = CURRENT_TIMESTAMP()
-            WHEN NOT MATCHED THEN INSERT (
-                ticker, position_factor, vr_score_used, sector, sector_avg_vr,
-                vr_diff, vr_component, market_cap_percentile, mcap_component,
-                pf_in_range, pf_expected, scored_at, updated_at
-            ) VALUES (
-                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP()
-            )
-        """
-        params = [
-            # USING clause
-            ticker,
-            # UPDATE SET
-            position_factor, vr_score_used, sector, sector_avg_vr,
-            vr_diff, vr_component, market_cap_percentile, mcap_component,
-            pf_in_range, pf_expected,
-            # INSERT VALUES
-            ticker, position_factor, vr_score_used, sector, sector_avg_vr,
-            vr_diff, vr_component, market_cap_percentile, mcap_component,
-            pf_in_range, pf_expected,
-        ]
-        cursor.execute(sql, params)
-        conn.commit()
-        cursor.close()
-    finally:
-        conn.close()
-
-
-def _upsert_scoring_pf(ticker: str, pf: Optional[float]) -> None:
-    """MERGE INTO SCORING — updates only the pf column, preserving existing tc/vr/hr."""
-    from app.services.snowflake import get_snowflake_connection
-    conn = get_snowflake_connection()
-    try:
-        cursor = conn.cursor()
-        sql = """
-            MERGE INTO SCORING AS tgt
-            USING (SELECT %s AS ticker) AS src
-            ON tgt.ticker = src.ticker
-            WHEN MATCHED THEN UPDATE SET
-                pf         = %s,
-                updated_at = CURRENT_TIMESTAMP()
-            WHEN NOT MATCHED THEN INSERT
-                (ticker, pf, scored_at, updated_at)
-            VALUES
-                (%s, %s, CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP())
-        """
-        cursor.execute(sql, [ticker, pf, ticker, pf])
-        conn.commit()
-        cursor.close()
-    finally:
-        conn.close()
 
 
 # =====================================================================
@@ -653,8 +579,7 @@ class PortfolioPFScoringResponse(BaseModel):
 
 def _fetch_pf_row(ticker: str) -> Optional[PFScoringRecord]:
     """Read pf column from the Snowflake SCORING table for one ticker."""
-    from app.repositories.scoring_read_repository import get_scoring_read_repo
-    row = get_scoring_read_repo().fetch_pf_row(ticker)
+    row = get_composite_scoring_repo().fetch_pf_row(ticker)
     if not row:
         return None
     return PFScoringRecord(
