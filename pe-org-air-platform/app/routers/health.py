@@ -399,3 +399,38 @@ async def health_env_check():
         },
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
+
+
+@router.get("/health/table-counts", summary="Snowflake table row counts")
+async def table_counts() -> Dict[str, int]:
+    """Return COUNT(*) for each of the 11 platform tables."""
+    tables = [
+        "INDUSTRIES", "COMPANIES", "ASSESSMENTS", "DIMENSION_SCORES",
+        "DOCUMENTS", "DOCUMENT_CHUNKS", "EXTERNAL_SIGNALS",
+        "COMPANY_SIGNAL_SUMMARIES", "SIGNAL_SCORES",
+        "SIGNAL_DIMENSION_MAPPING", "EVIDENCE_DIMENSION_SCORES",
+    ]
+    try:
+        import snowflake.connector
+        conn = snowflake.connector.connect(
+            account=os.getenv("SNOWFLAKE_ACCOUNT"),
+            user=os.getenv("SNOWFLAKE_USER"),
+            password=os.getenv("SNOWFLAKE_PASSWORD"),
+            warehouse=os.getenv("SNOWFLAKE_WAREHOUSE"),
+            database=os.getenv("SNOWFLAKE_DATABASE"),
+            schema=os.getenv("SNOWFLAKE_SCHEMA"),
+            role=os.getenv("SNOWFLAKE_ROLE"),
+        )
+        cur = conn.cursor()
+        counts = {}
+        for t in tables:
+            try:
+                cur.execute(f"SELECT COUNT(*) FROM {t}")
+                counts[t] = cur.fetchone()[0]
+            except Exception:
+                counts[t] = 0
+        cur.close()
+        conn.close()
+        return counts
+    except Exception:
+        return {t: -1 for t in tables}

@@ -53,68 +53,18 @@ def _api(path: str, timeout: int = 30) -> Optional[Dict]:
         return None
 
 
-# ---------------------------------------------------------------------------
-# Snowflake direct
-# ---------------------------------------------------------------------------
-
-# for local dev, we can use .env vars to connect to Snowflake; when deployed on Render, we switch to Streamlit secrets for better security and performance
-# def _get_snowflake_conn():
-#     import snowflake.connector
-#     from dotenv import load_dotenv
-#     project_root = Path(__file__).parent.parent
-#     load_dotenv(project_root / ".env")
-#     return snowflake.connector.connect(
-#         user=os.getenv("SNOWFLAKE_USER"),
-#         password=os.getenv("SNOWFLAKE_PASSWORD"),
-#         account=os.getenv("SNOWFLAKE_ACCOUNT"),
-#         warehouse=os.getenv("SNOWFLAKE_WAREHOUSE"),
-#         database=os.getenv("SNOWFLAKE_DATABASE"),
-#         schema=os.getenv("SNOWFLAKE_SCHEMA"),
-#     )
-
-# after hosting API on Render, we can switch to direct Snowflake queries for better performance on data-heavy pages like CS1 and CS2
-def _get_snowflake_conn():
-    import snowflake.connector
-    # Try Streamlit secrets first, fall back to env vars
-    def _get(key):
-        try:
-            return st.secrets[key]
-        except Exception:
-            return os.getenv(key)
-    
-    return snowflake.connector.connect(
-        user=_get("SNOWFLAKE_USER"),
-        password=_get("SNOWFLAKE_PASSWORD"),
-        account=_get("SNOWFLAKE_ACCOUNT"),
-        warehouse=_get("SNOWFLAKE_WAREHOUSE"),
-        database=_get("SNOWFLAKE_DATABASE"),
-        schema=_get("SNOWFLAKE_SCHEMA"),
-    )
-
-
 @st.cache_data(ttl=300)
 def get_table_counts() -> Dict[str, int]:
-    tables = [
-        "COMPANIES", "INDUSTRIES", "ASSESSMENTS", "DIMENSION_SCORES",
-        "DOCUMENTS", "DOCUMENT_CHUNKS", "EXTERNAL_SIGNALS",
-        "COMPANY_SIGNAL_SUMMARIES", "SCORING",
-        "SIGNAL_DIMENSION_MAPPING", "EVIDENCE_DIMENSION_SCORES",
-    ]
-    counts = {}
-    try:
-        conn = _get_snowflake_conn()
-        cur = conn.cursor()
-        for t in tables:
-            try:
-                cur.execute(f"SELECT COUNT(*) FROM {t}")
-                counts[t] = cur.fetchone()[0]
-            except Exception:
-                counts[t] = 0
-        cur.close()
-        conn.close()
-    except Exception:
-        counts = {t: -1 for t in tables}
-    return counts
+    data = _api("/health/table-counts")
+    if data is None:
+        tables = [
+            "INDUSTRIES", "COMPANIES", "ASSESSMENTS", "DIMENSION_SCORES",
+            "DOCUMENTS", "DOCUMENT_CHUNKS", "EXTERNAL_SIGNALS",
+            "COMPANY_SIGNAL_SUMMARIES", "SIGNAL_SCORES",
+            "SIGNAL_DIMENSION_MAPPING", "EVIDENCE_DIMENSION_SCORES",
+        ]
+        return {t: -1 for t in tables}
+    return data
 
 
 # ---------------------------------------------------------------------------
@@ -193,24 +143,21 @@ def build_dimensions_df() -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 @st.cache_data(ttl=300)
 def get_signal_summaries() -> pd.DataFrame:
-    try:
-        conn = _get_snowflake_conn()
-        cur = conn.cursor()
-        cur.execute("""
-            SELECT ticker, technology_hiring_score, innovation_activity_score,
-                   digital_presence_score, leadership_signals_score, composite_score,
-                   signal_count
-            FROM company_signal_summaries
-            WHERE ticker IN ('NVDA','JPM','WMT','GE','DG')
-            ORDER BY composite_score DESC
-        """)
-        cols = [d[0] for d in cur.description]
-        rows = cur.fetchall()
-        cur.close()
-        conn.close()
-        return pd.DataFrame(rows, columns=cols)
-    except Exception:
-        return pd.DataFrame()
+    rows = []
+    for ticker in CS3_TICKERS:
+        data = _api(f"/api/v1/signals/{ticker}/current-scores")
+        if not data:
+            continue
+        rows.append({
+            "TICKER": ticker,
+            "TECHNOLOGY_HIRING_SCORE":  (data.get("technology_hiring")  or {}).get("score") or 0,
+            "INNOVATION_ACTIVITY_SCORE":(data.get("innovation_activity") or {}).get("score") or 0,
+            "DIGITAL_PRESENCE_SCORE":   (data.get("digital_presence")   or {}).get("score") or 0,
+            "LEADERSHIP_SIGNALS_SCORE": (data.get("leadership_signals") or {}).get("score") or 0,
+            "COMPOSITE_SCORE": data.get("composite_score") or 0,
+            "SIGNAL_COUNT": 0,
+        })
+    return pd.DataFrame(rows)
 
 
 # ---------------------------------------------------------------------------
@@ -218,25 +165,25 @@ def get_signal_summaries() -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 @st.cache_data(ttl=300)
 def get_document_stats() -> pd.DataFrame:
-    try:
-        conn = _get_snowflake_conn()
-        cur = conn.cursor()
-        cur.execute("""
-            SELECT d.ticker, d.filing_type, COUNT(*) as doc_count,
-                   COALESCE(SUM(d.word_count), 0) as total_words,
-                   COALESCE(SUM(d.chunk_count), 0) as total_chunks
-            FROM documents d
-            WHERE d.ticker IN ('NVDA','JPM','WMT','GE','DG')
-            GROUP BY d.ticker, d.filing_type
-            ORDER BY d.ticker, d.filing_type
-        """)
-        cols = [d[0] for d in cur.description]
-        rows = cur.fetchall()
-        cur.close()
-        conn.close()
-        return pd.DataFrame(rows, columns=cols)
-    except Exception:
+    data = _api("/api/v1/documents/report")
+    if not data:
         return pd.DataFrame()
+    filing_map = [
+        ("10-K",    "form_10k"),
+        ("10-Q",    "form_10q"),
+        ("8-K",     "form_8k"),
+        ("DEF 14A", "def_14a"),
+    ]
+    rows = []
+    for company in data.get("documents_by_company", []):
+        ticker = (company.get("ticker") or "").upper()
+        if ticker not in CS3_TICKERS:
+            continue
+        for filing_type, key in filing_map:
+            count = company.get(key) or 0
+            if count > 0:
+                rows.append({"TICKER": ticker, "FILING_TYPE": filing_type, "DOC_COUNT": count})
+    return pd.DataFrame(rows)
 
 
 # ---------------------------------------------------------------------------
