@@ -10,16 +10,23 @@ Already registered in main.py as tc_vr_router.
 """
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
 from datetime import datetime, timezone
-from decimal import Decimal
 import logging
 import time
 from fastapi.responses import StreamingResponse
 import io
 
 from app.repositories.composite_scoring_repository import get_composite_scoring_repo
+from app.services.composite_scoring_service import (
+    get_composite_scoring_service,
+    TCVRResponse,
+    JobAnalysisOutput,
+    TCBreakdown,
+    VRBreakdownOutput,
+    ValidationOutput,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -28,77 +35,19 @@ router = APIRouter(prefix="/api/v1/scoring", tags=["CS3 TC + V^R Scoring"])
 # The 5 CS3 portfolio companies
 CS3_PORTFOLIO = ["NVDA", "JPM", "WMT", "GE", "DG"]
 
-# CS3 Table 5 — expected ranges for validation
+# CS3 Table 5 — expected ranges for validation (used by report helpers)
 EXPECTED_RANGES = {
     "NVDA": {"tc": (0.05, 0.20), "pf": (0.7, 1.0),  "vr": (80, 100)},
     "JPM":  {"tc": (0.10, 0.25), "pf": (0.3, 0.7),  "vr": (60, 80)},
     "WMT":  {"tc": (0.12, 0.28), "pf": (0.1, 0.5),  "vr": (50, 70)},
     "GE":   {"tc": (0.18, 0.35), "pf": (-0.2, 0.2), "vr": (40, 60)},
-    "DG":   {"tc": (0.22, 0.40), "pf": (-0.5, -0.1),"vr": (30, 50)},
+    "DG":   {"tc": (0.22, 0.40), "pf": (-0.5, -0.1), "vr": (30, 50)},
 }
 
 
 # =====================================================================
-# Response Models
+# Response Models (portfolio + GET — stay in router)
 # =====================================================================
-
-class JobAnalysisOutput(BaseModel):
-    total_ai_jobs: int
-    senior_ai_jobs: int
-    mid_ai_jobs: int
-    entry_ai_jobs: int
-    unique_skills: List[str]
-
-
-class TCBreakdown(BaseModel):
-    leadership_ratio: float
-    team_size_factor: float
-    skill_concentration: float
-    individual_factor: float
-
-
-class VRBreakdownOutput(BaseModel):
-    vr_score: float
-    weighted_dim_score: float
-    talent_risk_adj: float
-
-
-class ValidationOutput(BaseModel):
-    tc_in_range: bool
-    tc_expected: str
-    vr_in_range: bool
-    vr_expected: str
-
-
-class TCVRResponse(BaseModel):
-    ticker: str
-    status: str  # "success" or "failed"
-
-    # TC outputs
-    talent_concentration: Optional[float] = None
-    tc_breakdown: Optional[TCBreakdown] = None
-
-    # Job analysis
-    job_analysis: Optional[JobAnalysisOutput] = None
-
-    # Glassdoor
-    individual_mentions: Optional[int] = None
-    review_count: Optional[int] = None
-    ai_mentions: Optional[int] = None
-
-    # VR outputs
-    vr_result: Optional[VRBreakdownOutput] = None
-
-    # Dimension scores used
-    dimension_scores: Optional[Dict[str, float]] = None
-
-    # Validation against CS3 Table 5
-    validation: Optional[ValidationOutput] = None
-
-    duration_seconds: Optional[float] = None
-    error: Optional[str] = None
-    scored_at: Optional[str] = None
-
 
 class PortfolioTCVRResponse(BaseModel):
     status: str
@@ -107,179 +56,6 @@ class PortfolioTCVRResponse(BaseModel):
     results: List[TCVRResponse]
     summary_table: List[Dict[str, Any]]
     duration_seconds: float
-
-
-# =====================================================================
-# Helpers
-# =====================================================================
-
-def _compute_tc_vr(ticker: str) -> TCVRResponse:
-    """
-    Core logic: load data from S3, compute TC, load dimension scores
-    from ScoringService, compute V^R. Returns full breakdown.
-    """
-    start = time.time()
-    ticker = ticker.upper()
-
-    try:
-        # ---- 1. Get dimension scores from existing ScoringService ----
-        from app.services.scoring_service import get_scoring_service
-        scoring_svc = get_scoring_service()
-
-        logger.info("=" * 60)
-        logger.info(f"🎯 TC + V^R SCORING: {ticker}")
-        logger.info("=" * 60)
-
-        # Run the base scoring pipeline (5.0a + 5.0b) to get dimension scores
-        base_result = scoring_svc.score_company(ticker)
-        dim_scores_list = base_result.get("dimension_scores", [])
-
-        logger.info(f"[{ticker}] Base scoring complete — {len(dim_scores_list)} dimensions")
-        for ds in dim_scores_list:
-            logger.info(f"  {ds['dimension']:25s} = {ds['score']:6.2f}")
-
-        # ---- 2. Load job postings from S3 ----
-        from app.scoring.talent_concentration import TalentConcentrationCalculator
-        tc_calc = TalentConcentrationCalculator()
-
-        from app.services.s3_storage import get_s3_service
-        s3 = get_s3_service()
-
-        # Load jobs
-        job_postings = _load_jobs_s3(ticker, s3)
-        logger.info(f"[{ticker}] Loaded {len(job_postings)} job postings from S3")
-
-        # Analyze jobs
-        job_analysis = tc_calc.analyze_job_postings(job_postings)
-        logger.info(f"[{ticker}] Job Analysis:")
-        logger.info(f"  Total AI jobs:  {job_analysis.total_ai_jobs}")
-        logger.info(f"  Senior AI jobs: {job_analysis.senior_ai_jobs}")
-        logger.info(f"  Mid AI jobs:    {job_analysis.mid_ai_jobs}")
-        logger.info(f"  Entry AI jobs:  {job_analysis.entry_ai_jobs}")
-        logger.info(f"  Unique skills:  {len(job_analysis.unique_skills)} → {sorted(job_analysis.unique_skills)[:10]}")
-
-        # ---- 3. Load Glassdoor reviews from S3 ----
-        glassdoor_reviews = tc_calc.load_glassdoor_reviews(ticker, s3)
-        logger.info(f"[{ticker}] Loaded {len(glassdoor_reviews)} Glassdoor reviews from S3")
-
-        indiv_mentions, rev_count = tc_calc.count_individual_mentions(glassdoor_reviews)
-        ai_mentions, _ = tc_calc.count_ai_mentions(glassdoor_reviews)
-        logger.info(f"[{ticker}] Glassdoor: {indiv_mentions} individual mentions, "
-                     f"{ai_mentions} AI mentions out of {rev_count} reviews")
-
-        # ---- 4. Calculate TC ----
-        tc = tc_calc.calculate_tc(job_analysis, indiv_mentions, rev_count)
-
-        # Recompute breakdown components for logging
-        total = job_analysis.total_ai_jobs
-        senior = job_analysis.senior_ai_jobs
-        leadership_ratio = senior / total if total > 0 else 0.5
-        team_size_factor = min(1.0, 1.0 / (total ** 0.5 + 0.1)) if total > 0 else min(1.0, 1.0 / 0.1)
-        skill_concentration = max(0.0, 1.0 - len(job_analysis.unique_skills) / 15)
-        individual_factor = indiv_mentions / rev_count if rev_count > 0 else 0.5
-
-        logger.info(f"[{ticker}] TC Breakdown:")
-        logger.info(f"  leadership_ratio   = {leadership_ratio:.4f}  (× 0.40 = {0.4 * leadership_ratio:.4f})")
-        logger.info(f"  team_size_factor   = {team_size_factor:.4f}  (× 0.30 = {0.3 * team_size_factor:.4f})")
-        logger.info(f"  skill_concentration= {skill_concentration:.4f}  (× 0.20 = {0.2 * skill_concentration:.4f})")
-        logger.info(f"  individual_factor  = {individual_factor:.4f}  (× 0.10 = {0.1 * individual_factor:.4f})")
-        logger.info(f"  ───────────────────────────────────────")
-        logger.info(f"  TC = {float(tc):.4f}")
-
-        # ---- 5. Calculate V^R ----
-        from app.scoring.vr_calculator import VRCalculator
-        vr_calc = VRCalculator()
-
-        # Build dimension dict for VR calculator
-        dim_score_dict = {row["dimension"]: row["score"] for row in dim_scores_list}
-        vr_result = vr_calc.calculate(dim_score_dict, float(tc))
-
-        logger.info(f"[{ticker}] V^R Calculation:")
-        logger.info(f"  Weighted Dim Score = {vr_result.weighted_dim_score}")
-        logger.info(f"  TalentRiskAdj      = {vr_result.talent_risk_adj}")
-        logger.info(f"  V^R Score          = {vr_result.vr_score}")
-
-        # ---- 6. Validate against CS3 Table 5 ----
-        validation = None
-        if ticker in EXPECTED_RANGES:
-            exp = EXPECTED_RANGES[ticker]
-            tc_ok = exp["tc"][0] <= float(tc) <= exp["tc"][1]
-            vr_ok = exp["vr"][0] <= float(vr_result.vr_score) <= exp["vr"][1]
-            validation = ValidationOutput(
-                tc_in_range=tc_ok,
-                tc_expected=f"{exp['tc'][0]:.2f} - {exp['tc'][1]:.2f}",
-                vr_in_range=vr_ok,
-                vr_expected=f"{exp['vr'][0]} - {exp['vr'][1]}",
-            )
-            tc_status = "✅" if tc_ok else "⚠️  OUT OF RANGE"
-            vr_status = "✅" if vr_ok else "⚠️  OUT OF RANGE"
-            logger.info(f"[{ticker}] Validation (CS3 Table 5):")
-            logger.info(f"  TC  = {float(tc):.4f}  expected {exp['tc']}  {tc_status}")
-            logger.info(f"  V^R = {float(vr_result.vr_score):.2f}  expected {exp['vr']}  {vr_status}")
-
-        logger.info("=" * 60)
-
-        return TCVRResponse(
-            ticker=ticker,
-            status="success",
-            talent_concentration=float(tc),
-            tc_breakdown=TCBreakdown(
-                leadership_ratio=round(leadership_ratio, 4),
-                team_size_factor=round(team_size_factor, 4),
-                skill_concentration=round(skill_concentration, 4),
-                individual_factor=round(individual_factor, 4),
-            ),
-            job_analysis=JobAnalysisOutput(
-                total_ai_jobs=job_analysis.total_ai_jobs,
-                senior_ai_jobs=job_analysis.senior_ai_jobs,
-                mid_ai_jobs=job_analysis.mid_ai_jobs,
-                entry_ai_jobs=job_analysis.entry_ai_jobs,
-                unique_skills=sorted(job_analysis.unique_skills),
-            ),
-            individual_mentions=indiv_mentions,
-            review_count=rev_count,
-            ai_mentions=ai_mentions,
-            vr_result=VRBreakdownOutput(
-                vr_score=float(vr_result.vr_score),
-                weighted_dim_score=float(vr_result.weighted_dim_score),
-                talent_risk_adj=float(vr_result.talent_risk_adj),
-            ),
-            dimension_scores=dim_score_dict,
-            validation=validation,
-            duration_seconds=round(time.time() - start, 2),
-            scored_at=datetime.now(timezone.utc).isoformat(),
-        )
-
-    except Exception as e:
-        logger.error(f"TC+VR scoring failed for {ticker}: {e}", exc_info=True)
-        return TCVRResponse(
-            ticker=ticker,
-            status="failed",
-            error=str(e),
-            duration_seconds=round(time.time() - start, 2),
-        )
-
-
-def _load_jobs_s3(ticker: str, s3) -> list:
-    """Load job postings from S3 — same logic as vr_scoring_service.py."""
-    import json
-    prefix = f"signals/jobs/{ticker}/"
-    try:
-        keys = s3.list_files(prefix)
-        for key in sorted(keys, reverse=True):
-            raw = s3.get_file(key)
-            if raw is None:
-                continue
-            data = json.loads(raw)
-            postings = data.get("job_postings", [])
-            if postings:
-                for p in postings:
-                    if "ai_skills_found" not in p:
-                        p["ai_skills_found"] = p.get("ai_keywords_found", [])
-                return postings
-    except Exception as exc:
-        logger.warning(f"[{ticker}] Job S3 load failed: {exc}")
-    return []
 
 
 # =====================================================================
@@ -301,6 +77,7 @@ def _load_jobs_s3(ticker: str, s3) -> list:
 async def score_portfolio_tc_vr():
     """Score all 5 companies — TC + V^R."""
     start = time.time()
+    svc = get_composite_scoring_service()
 
     logger.info("=" * 70)
     logger.info("🚀 TC + V^R PORTFOLIO SCORING — 5 COMPANIES")
@@ -311,11 +88,10 @@ async def score_portfolio_tc_vr():
     failed = 0
 
     for ticker in CS3_PORTFOLIO:
-        result = _compute_tc_vr(ticker)
+        result = svc.compute_tc_vr(ticker)
         results.append(result)
         if result.status == "success":
             scored += 1
-            _save_tc_vr_result(result)
         else:
             failed += 1
 
@@ -325,7 +101,10 @@ async def score_portfolio_tc_vr():
     logger.info("=" * 70)
     logger.info("📊 PORTFOLIO SUMMARY TABLE")
     logger.info("=" * 70)
-    logger.info(f"{'Ticker':<8} {'TC':>8} {'TalentRiskAdj':>15} {'WeightedDim':>13} {'V^R':>8} {'TC OK':>7} {'VR OK':>7}")
+    logger.info(
+        f"{'Ticker':<8} {'TC':>8} {'TalentRiskAdj':>15} "
+        f"{'WeightedDim':>13} {'V^R':>8} {'TC OK':>7} {'VR OK':>7}"
+    )
     logger.info("-" * 70)
 
     for r in results:
@@ -359,7 +138,9 @@ async def score_portfolio_tc_vr():
             summary.append({"ticker": r.ticker, "status": "failed", "error": r.error})
 
     logger.info("-" * 70)
-    logger.info(f"Scored: {scored}  Failed: {failed}  Duration: {time.time() - start:.2f}s")
+    logger.info(
+        f"Scored: {scored}  Failed: {failed}  Duration: {time.time() - start:.2f}s"
+    )
     logger.info("=" * 70)
 
     return PortfolioTCVRResponse(
@@ -394,7 +175,9 @@ def _generate_portfolio_report(portfolio: PortfolioTCVRResponse) -> str:
     # ---- Summary Table ----
     lines.append("## Portfolio Summary Table")
     lines.append("")
-    lines.append("| Ticker | TC | TalentRiskAdj | Weighted Dim | V^R | TC Range | TC ✓ | V^R Range | V^R ✓ |")
+    lines.append(
+        "| Ticker | TC | TalentRiskAdj | Weighted Dim | V^R | TC Range | TC ✓ | V^R Range | V^R ✓ |"
+    )
     lines.append("|--------|------|---------------|-------------|-------|----------|------|-----------|-------|")
 
     tc_pass = 0
@@ -445,7 +228,6 @@ def _generate_portfolio_report(portfolio: PortfolioTCVRResponse) -> str:
     lines.append("## Validation Scorecard")
     lines.append("")
 
-    close_count = sum(1 for _, _, _, _, g in vr_close if g <= 15)
     vr_note = ""
     if vr_close:
         close_tickers = [t for t, _, _, _, g in vr_close if g <= 15]
@@ -478,10 +260,11 @@ def _generate_portfolio_report(portfolio: PortfolioTCVRResponse) -> str:
                 continue
 
             ticker, vr_score, exp_lo, exp_hi, gap = match[0]
-            lines.append(f"### {ticker} — V^R = {vr_score:.2f} (expected {exp_lo}–{exp_hi})")
+            lines.append(
+                f"### {ticker} — V^R = {vr_score:.2f} (expected {exp_lo}–{exp_hi})"
+            )
             lines.append("")
 
-            # Dimension breakdown
             if r.dimension_scores:
                 dim_lines = []
                 for dim, score in sorted(r.dimension_scores.items(), key=lambda x: x[1]):
@@ -490,17 +273,15 @@ def _generate_portfolio_report(portfolio: PortfolioTCVRResponse) -> str:
                 lines.extend(dim_lines)
                 lines.append("")
 
-            # Job analysis context
             if r.job_analysis:
                 ja = r.job_analysis
                 lines.append(
                     f"**Job analysis:** {ja.total_ai_jobs} AI jobs "
-                    f"({ja.senior_ai_jobs} senior, {ja.mid_ai_jobs} mid, {ja.entry_ai_jobs} entry), "
-                    f"{len(ja.unique_skills)} unique skills"
+                    f"({ja.senior_ai_jobs} senior, {ja.mid_ai_jobs} mid, "
+                    f"{ja.entry_ai_jobs} entry), {len(ja.unique_skills)} unique skills"
                 )
                 lines.append("")
 
-            # Auto-generated explanation
             explanation = _explain_gap(r)
             if explanation:
                 lines.append(f"**Explanation:** {explanation}")
@@ -509,8 +290,13 @@ def _generate_portfolio_report(portfolio: PortfolioTCVRResponse) -> str:
     # ---- TC Breakdown ----
     lines.append("## TC Breakdown by Company")
     lines.append("")
-    lines.append("| Ticker | Leadership Ratio | Team Size Factor | Skill Concentration | Individual Factor | TC |")
-    lines.append("|--------|-----------------|-----------------|--------------------|--------------------|------|")
+    lines.append(
+        "| Ticker | Leadership Ratio | Team Size Factor | Skill Concentration "
+        "| Individual Factor | TC |"
+    )
+    lines.append(
+        "|--------|-----------------|-----------------|--------------------|--------------------|------|"
+    )
 
     for r in portfolio.results:
         if r.status != "success" or not r.tc_breakdown:
@@ -518,7 +304,8 @@ def _generate_portfolio_report(portfolio: PortfolioTCVRResponse) -> str:
         b = r.tc_breakdown
         lines.append(
             f"| {r.ticker} | {b.leadership_ratio:.4f} | {b.team_size_factor:.4f} "
-            f"| {b.skill_concentration:.4f} | {b.individual_factor:.4f} | {r.talent_concentration:.4f} |"
+            f"| {b.skill_concentration:.4f} | {b.individual_factor:.4f} "
+            f"| {r.talent_concentration:.4f} |"
         )
 
     lines.append("")
@@ -533,7 +320,11 @@ def _generate_portfolio_report(portfolio: PortfolioTCVRResponse) -> str:
             all_dims.update(r.dimension_scores.keys())
     dims_sorted = sorted(all_dims)
 
-    header = "| Ticker | " + " | ".join(d.replace("_", " ").title() for d in dims_sorted) + " |"
+    header = (
+        "| Ticker | "
+        + " | ".join(d.replace("_", " ").title() for d in dims_sorted)
+        + " |"
+    )
     sep = "|--------|" + "|".join("------" for _ in dims_sorted) + "|"
     lines.append(header)
     lines.append(sep)
@@ -541,7 +332,9 @@ def _generate_portfolio_report(portfolio: PortfolioTCVRResponse) -> str:
     for r in portfolio.results:
         if r.status != "success" or not r.dimension_scores:
             continue
-        vals = " | ".join(f"{r.dimension_scores.get(d, 0):.1f}" for d in dims_sorted)
+        vals = " | ".join(
+            f"{r.dimension_scores.get(d, 0):.1f}" for d in dims_sorted
+        )
         lines.append(f"| {r.ticker} | {vals} |")
 
     lines.append("")
@@ -596,7 +389,6 @@ def _explain_gap(r: TCVRResponse) -> str:
             f"Score is within expected range."
         )
 
-    # Fallback: find the weakest dimensions
     if dims:
         sorted_dims = sorted(dims.items(), key=lambda x: x[1])
         weak = sorted_dims[:2]
@@ -634,16 +426,16 @@ def _explain_gap(r: TCVRResponse) -> str:
 async def download_portfolio_report():
     """Score all 5 companies, generate MD report, return as downloadable file."""
     start = time.time()
+    svc = get_composite_scoring_service()
 
     logger.info("📝 Generating downloadable TC + V^R Portfolio Report")
 
-    # Run portfolio scoring
     results = []
     scored = 0
     failed = 0
 
     for ticker in CS3_PORTFOLIO:
-        result = _compute_tc_vr(ticker)
+        result = svc.compute_tc_vr(ticker)
         results.append(result)
         if result.status == "success":
             scored += 1
@@ -659,14 +451,11 @@ async def download_portfolio_report():
         duration_seconds=round(time.time() - start, 2),
     )
 
-    # Generate markdown content
     md_content = _generate_portfolio_report(portfolio)
 
-    # Build filename with timestamp
     ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     filename = f"cs3_tc_vr_portfolio_report_{ts}.md"
 
-    # Stream as downloadable file
     buffer = io.BytesIO(md_content.encode("utf-8"))
     buffer.seek(0)
 
@@ -680,6 +469,7 @@ async def download_portfolio_report():
             "Content-Length": str(len(md_content.encode("utf-8"))),
         },
     )
+
 
 @router.post(
     "/tc-vr/{ticker}",
@@ -700,88 +490,7 @@ async def download_portfolio_report():
 )
 async def score_tc_vr(ticker: str):
     """Score one company — TC + V^R. Saves result to S3 + Snowflake SCORING table."""
-    result = _compute_tc_vr(ticker.upper())
-    if result.status == "success":
-        _save_tc_vr_result(result)
-    return result
-
-
-# =====================================================================
-# Snowflake + S3 persistence helpers
-# =====================================================================
-
-def _save_tc_vr_result(result: TCVRResponse) -> None:
-    """Save TC + V^R result to S3 JSON and upsert into Snowflake SCORING, TC_SCORING, VR_SCORING tables."""
-    ticker = result.ticker
-    try:
-        from app.services.s3_storage import get_s3_service
-        s3 = get_s3_service()
-        ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-        s3_key = f"scoring/tc_vr/{ticker}/{ts}.json"
-        s3.upload_json(result.model_dump(), s3_key)
-        logger.info(f"[{ticker}] TC+VR result saved to S3: {s3_key}")
-    except Exception as e:
-        logger.warning(f"[{ticker}] S3 save failed (non-fatal): {e}")
-
-    try:
-        tc = result.talent_concentration
-        vr = result.vr_result.vr_score if result.vr_result else None
-        get_composite_scoring_repo().upsert_scoring_table(ticker, tc=tc, vr=vr)
-        logger.info(f"[{ticker}] SCORING table upserted: TC={tc}, VR={vr}")
-    except Exception as e:
-        logger.warning(f"[{ticker}] Snowflake SCORING upsert failed (non-fatal): {e}")
-
-    # TC_SCORING — breakdown detail table
-    try:
-        bd = result.tc_breakdown
-        ja = result.job_analysis
-        val = result.validation
-        get_composite_scoring_repo().upsert_tc_result(
-            ticker,
-            tc=result.talent_concentration,
-            leadership_ratio=bd.leadership_ratio if bd else None,
-            team_size_factor=bd.team_size_factor if bd else None,
-            skill_concentration=bd.skill_concentration if bd else None,
-            individual_factor=bd.individual_factor if bd else None,
-            total_ai_jobs=ja.total_ai_jobs if ja else None,
-            senior_ai_jobs=ja.senior_ai_jobs if ja else None,
-            mid_ai_jobs=ja.mid_ai_jobs if ja else None,
-            entry_ai_jobs=ja.entry_ai_jobs if ja else None,
-            unique_skills_cnt=len(ja.unique_skills) if ja else None,
-            individual_mentions=result.individual_mentions,
-            review_count=result.review_count,
-            ai_mentions=result.ai_mentions,
-            tc_in_range=val.tc_in_range if val else None,
-            tc_expected=val.tc_expected if val else None,
-        )
-        logger.info(f"[{ticker}] TC_SCORING table upserted")
-    except Exception as e:
-        logger.warning(f"[{ticker}] TC_SCORING upsert failed (non-fatal): {e}")
-
-    # VR_SCORING — breakdown detail table
-    try:
-        vr_r = result.vr_result
-        val = result.validation
-        dims = result.dimension_scores or {}
-        get_composite_scoring_repo().upsert_vr_result(
-            ticker,
-            vr_score=vr_r.vr_score if vr_r else None,
-            weighted_dim_score=vr_r.weighted_dim_score if vr_r else None,
-            talent_risk_adj=vr_r.talent_risk_adj if vr_r else None,
-            tc_used=result.talent_concentration,
-            dim_data_infra=dims.get("data_infrastructure"),
-            dim_ai_gov=dims.get("ai_governance"),
-            dim_tech_stack=dims.get("technology_stack"),
-            dim_talent=dims.get("talent_skills"),
-            dim_leadership=dims.get("leadership_vision"),
-            dim_use_case=dims.get("use_case_portfolio"),
-            dim_culture=dims.get("culture_change"),
-            vr_in_range=val.vr_in_range if val else None,
-            vr_expected=val.vr_expected if val else None,
-        )
-        logger.info(f"[{ticker}] VR_SCORING table upserted")
-    except Exception as e:
-        logger.warning(f"[{ticker}] VR_SCORING upsert failed (non-fatal): {e}")
+    return get_composite_scoring_service().compute_tc_vr(ticker.upper())
 
 
 # =====================================================================
@@ -873,7 +582,6 @@ async def get_portfolio_tc_vr():
 )
 async def get_tc_vr(ticker: str):
     """Return last stored TC + V^R for one company."""
-    from fastapi import HTTPException
     row = _fetch_scoring_row(ticker.upper())
     if not row:
         raise HTTPException(

@@ -9,127 +9,31 @@ Endpoints:
   GET  /api/v1/scoring/orgair/{ticker}        — Read one from Snowflake
 """
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
 from datetime import datetime, timezone
-from decimal import Decimal
-from pathlib import Path
-import json
 import logging
 import time
 
 from app.repositories.composite_scoring_repository import get_composite_scoring_repo
+from app.services.composite_scoring_service import (
+    get_composite_scoring_service,
+    OrgAIRResponse,
+    OrgAIRBreakdown,
+    OrgAIRValidation,
+    CIBreakdown,
+    CS3_PORTFOLIO,
+)
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/scoring", tags=["CS3 Org-AI-R"])
 
-# The 5 CS3 portfolio companies
-CS3_PORTFOLIO = ["NVDA", "JPM", "WMT", "GE", "DG"]
-
-# Sector assignments (matches hr_scoring.py)
-COMPANY_SECTORS = {
-    "NVDA": "technology",
-    "JPM": "financial_services",
-    "WMT": "retail",
-    "GE": "manufacturing",
-    "DG": "retail",
-}
-
-# Market cap percentiles (manual input)
-MARKET_CAP_PERCENTILES = {
-    "NVDA": 0.95, "JPM": 0.85, "WMT": 0.60, "GE": 0.50, "DG": 0.30,
-}
-
-COMPANY_NAMES = {
-    "NVDA": "NVIDIA Corporation",
-    "JPM": "JPMorgan Chase & Co.",
-    "WMT": "Walmart Inc.",
-    "GE": "GE Aerospace",
-    "DG": "Dollar General Corporation",
-}
-
-# Expected OrgAIR ranges from case study Table 5
-EXPECTED_ORGAIR_RANGES = {
-    "NVDA": (85.0, 95.0),
-    "JPM":  (65.0, 75.0),
-    "WMT":  (55.0, 65.0),
-    "GE":   (45.0, 55.0),
-    "DG":   (35.0, 45.0),
-}
-
-EXPECTED_TC_RANGES = {
-    "NVDA": (0.05, 0.20),
-    "JPM":  (0.10, 0.25),
-    "WMT":  (0.12, 0.28),
-    "GE":   (0.18, 0.35),
-    "DG":   (0.22, 0.40),
-}
-
-EXPECTED_PF_RANGES = {
-    "NVDA": (0.7, 1.0),
-    "JPM":  (0.3, 0.7),
-    "WMT":  (0.1, 0.5),
-    "GE":   (-0.2, 0.2),
-    "DG":   (-0.5, -0.1),
-}
-
-# Sector-specific timing factors (CS3 §6.3: TimingFactor ∈ [0.8, 1.2])
-SECTOR_TIMING = {
-    "technology": 1.20,
-    "financial_services": 1.05,
-    "retail": 1.00,
-    "manufacturing": 1.00,
-}
-
 
 # =====================================================================
-# Response Models
+# Response Models (portfolio + GET — stay in router)
 # =====================================================================
-
-class CIBreakdown(BaseModel):
-    ci_lower: float
-    ci_upper: float
-    sem: float
-    reliability: float
-    score_type: str
-
-
-class OrgAIRBreakdown(BaseModel):
-    org_air_score: float
-    vr_score: float
-    hr_score: float
-    synergy_score: float
-    weighted_base: float
-    synergy_contribution: float
-    vr_weighted: float
-    hr_weighted: float
-    alpha: float
-    beta: float
-    vr_ci: Optional[CIBreakdown] = None
-    hr_ci: Optional[CIBreakdown] = None
-    orgair_ci: Optional[CIBreakdown] = None
-
-
-class OrgAIRValidation(BaseModel):
-    orgair_in_range: bool
-    orgair_expected: str
-    status: str
-
-
-class OrgAIRResponse(BaseModel):
-    ticker: str
-    status: str
-
-    org_air_score: Optional[float] = None
-    breakdown: Optional[OrgAIRBreakdown] = None
-    validation: Optional[OrgAIRValidation] = None
-
-    duration_seconds: Optional[float] = None
-    error: Optional[str] = None
-    scored_at: Optional[str] = None
-
 
 class PortfolioOrgAIRResponse(BaseModel):
     status: str
@@ -147,361 +51,6 @@ class ResultsGenerationResponse(BaseModel):
     s3_files: List[str]
     summary: List[Dict[str, Any]]
     duration_seconds: float
-
-
-# =====================================================================
-# TEMPORARY: _compute_tc_vr duplicate — pending Phase 4 extraction
-# into CompositeScoringService.  Delete this entire section once
-# CompositeScoringService is created.
-# =====================================================================
-
-import json as _json
-from pydantic import BaseModel as _BaseModel
-from typing import Optional as _Optional, List as _List, Dict as _Dict
-
-_TC_VR_EXPECTED_RANGES = {
-    "NVDA": {"tc": (0.05, 0.20), "pf": (0.7, 1.0),  "vr": (80, 100)},
-    "JPM":  {"tc": (0.10, 0.25), "pf": (0.3, 0.7),  "vr": (60, 80)},
-    "WMT":  {"tc": (0.12, 0.28), "pf": (0.1, 0.5),  "vr": (50, 70)},
-    "GE":   {"tc": (0.18, 0.35), "pf": (-0.2, 0.2), "vr": (40, 60)},
-    "DG":   {"tc": (0.22, 0.40), "pf": (-0.5, -0.1),"vr": (30, 50)},
-}
-
-
-class JobAnalysisOutput(_BaseModel):
-    total_ai_jobs: int
-    senior_ai_jobs: int
-    mid_ai_jobs: int
-    entry_ai_jobs: int
-    unique_skills: _List[str]
-
-
-class TCBreakdown(_BaseModel):
-    leadership_ratio: float
-    team_size_factor: float
-    skill_concentration: float
-    individual_factor: float
-
-
-class VRBreakdownOutput(_BaseModel):
-    vr_score: float
-    weighted_dim_score: float
-    talent_risk_adj: float
-
-
-class ValidationOutput(_BaseModel):
-    tc_in_range: bool
-    tc_expected: str
-    vr_in_range: bool
-    vr_expected: str
-
-
-class TCVRResponse(_BaseModel):
-    ticker: str
-    status: str
-
-    talent_concentration: _Optional[float] = None
-    tc_breakdown: _Optional[TCBreakdown] = None
-
-    job_analysis: _Optional[JobAnalysisOutput] = None
-
-    individual_mentions: _Optional[int] = None
-    review_count: _Optional[int] = None
-    ai_mentions: _Optional[int] = None
-
-    vr_result: _Optional[VRBreakdownOutput] = None
-
-    dimension_scores: _Optional[_Dict[str, float]] = None
-
-    validation: _Optional[ValidationOutput] = None
-
-    duration_seconds: _Optional[float] = None
-    error: _Optional[str] = None
-    scored_at: _Optional[str] = None
-
-
-def _load_jobs_s3(ticker: str, s3) -> list:
-    """Load job postings from S3 — mirrors tc_vr_scoring._load_jobs_s3."""
-    prefix = f"signals/jobs/{ticker}/"
-    try:
-        keys = s3.list_files(prefix)
-        for key in sorted(keys, reverse=True):
-            raw = s3.get_file(key)
-            if raw is None:
-                continue
-            data = _json.loads(raw)
-            postings = data.get("job_postings", [])
-            if postings:
-                for p in postings:
-                    if "ai_skills_found" not in p:
-                        p["ai_skills_found"] = p.get("ai_keywords_found", [])
-                return postings
-    except Exception as exc:
-        logger.warning(f"[{ticker}] Job S3 load failed: {exc}")
-    return []
-
-
-# TEMPORARY: This is a duplicate pending Phase 4 extraction.
-# Delete this function once CompositeScoringService is created.
-def _compute_tc_vr(ticker: str) -> TCVRResponse:
-    """
-    Core logic: load data from S3, compute TC, load dimension scores
-    from ScoringService, compute V^R. Returns full breakdown.
-    Duplicated from tc_vr_scoring._compute_tc_vr to remove cross-router import.
-    """
-    start = time.time()
-    ticker = ticker.upper()
-
-    try:
-        from app.services.scoring_service import get_scoring_service
-        scoring_svc = get_scoring_service()
-
-        logger.info("=" * 60)
-        logger.info(f"TC + V^R SCORING: {ticker}")
-        logger.info("=" * 60)
-
-        base_result = scoring_svc.score_company(ticker)
-        dim_scores_list = base_result.get("dimension_scores", [])
-
-        logger.info(f"[{ticker}] Base scoring complete — {len(dim_scores_list)} dimensions")
-        for ds in dim_scores_list:
-            logger.info(f"  {ds['dimension']:25s} = {ds['score']:6.2f}")
-
-        from app.scoring.talent_concentration import TalentConcentrationCalculator
-        tc_calc = TalentConcentrationCalculator()
-
-        from app.services.s3_storage import get_s3_service
-        s3 = get_s3_service()
-
-        job_postings = _load_jobs_s3(ticker, s3)
-        logger.info(f"[{ticker}] Loaded {len(job_postings)} job postings from S3")
-
-        job_analysis = tc_calc.analyze_job_postings(job_postings)
-        logger.info(f"[{ticker}] Job Analysis:")
-        logger.info(f"  Total AI jobs:  {job_analysis.total_ai_jobs}")
-        logger.info(f"  Senior AI jobs: {job_analysis.senior_ai_jobs}")
-        logger.info(f"  Mid AI jobs:    {job_analysis.mid_ai_jobs}")
-        logger.info(f"  Entry AI jobs:  {job_analysis.entry_ai_jobs}")
-        logger.info(f"  Unique skills:  {len(job_analysis.unique_skills)} → {sorted(job_analysis.unique_skills)[:10]}")
-
-        glassdoor_reviews = tc_calc.load_glassdoor_reviews(ticker, s3)
-        logger.info(f"[{ticker}] Loaded {len(glassdoor_reviews)} Glassdoor reviews from S3")
-
-        indiv_mentions, rev_count = tc_calc.count_individual_mentions(glassdoor_reviews)
-        ai_mentions, _ = tc_calc.count_ai_mentions(glassdoor_reviews)
-        logger.info(
-            f"[{ticker}] Glassdoor: {indiv_mentions} individual mentions, "
-            f"{ai_mentions} AI mentions out of {rev_count} reviews"
-        )
-
-        tc = tc_calc.calculate_tc(job_analysis, indiv_mentions, rev_count)
-
-        total = job_analysis.total_ai_jobs
-        senior = job_analysis.senior_ai_jobs
-        leadership_ratio = senior / total if total > 0 else 0.5
-        team_size_factor = min(1.0, 1.0 / (total ** 0.5 + 0.1)) if total > 0 else min(1.0, 1.0 / 0.1)
-        skill_concentration = max(0.0, 1.0 - len(job_analysis.unique_skills) / 15)
-        individual_factor = indiv_mentions / rev_count if rev_count > 0 else 0.5
-
-        logger.info(f"[{ticker}] TC Breakdown:")
-        logger.info(f"  leadership_ratio   = {leadership_ratio:.4f}  (× 0.40 = {0.4 * leadership_ratio:.4f})")
-        logger.info(f"  team_size_factor   = {team_size_factor:.4f}  (× 0.30 = {0.3 * team_size_factor:.4f})")
-        logger.info(f"  skill_concentration= {skill_concentration:.4f}  (× 0.20 = {0.2 * skill_concentration:.4f})")
-        logger.info(f"  individual_factor  = {individual_factor:.4f}  (× 0.10 = {0.1 * individual_factor:.4f})")
-        logger.info(f"  ───────────────────────────────────────")
-        logger.info(f"  TC = {float(tc):.4f}")
-
-        from app.scoring.vr_calculator import VRCalculator
-        vr_calc = VRCalculator()
-
-        dim_score_dict = {row["dimension"]: row["score"] for row in dim_scores_list}
-        vr_result = vr_calc.calculate(dim_score_dict, float(tc))
-
-        logger.info(f"[{ticker}] V^R Calculation:")
-        logger.info(f"  Weighted Dim Score = {vr_result.weighted_dim_score}")
-        logger.info(f"  TalentRiskAdj      = {vr_result.talent_risk_adj}")
-        logger.info(f"  V^R Score          = {vr_result.vr_score}")
-
-        validation = None
-        if ticker in _TC_VR_EXPECTED_RANGES:
-            exp = _TC_VR_EXPECTED_RANGES[ticker]
-            tc_ok = exp["tc"][0] <= float(tc) <= exp["tc"][1]
-            vr_ok = exp["vr"][0] <= float(vr_result.vr_score) <= exp["vr"][1]
-            validation = ValidationOutput(
-                tc_in_range=tc_ok,
-                tc_expected=f"{exp['tc'][0]:.2f} - {exp['tc'][1]:.2f}",
-                vr_in_range=vr_ok,
-                vr_expected=f"{exp['vr'][0]} - {exp['vr'][1]}",
-            )
-            tc_status = "✅" if tc_ok else "⚠️  OUT OF RANGE"
-            vr_status = "✅" if vr_ok else "⚠️  OUT OF RANGE"
-            logger.info(f"[{ticker}] Validation (CS3 Table 5):")
-            logger.info(f"  TC  = {float(tc):.4f}  expected {exp['tc']}  {tc_status}")
-            logger.info(f"  V^R = {float(vr_result.vr_score):.2f}  expected {exp['vr']}  {vr_status}")
-
-        logger.info("=" * 60)
-
-        return TCVRResponse(
-            ticker=ticker,
-            status="success",
-            talent_concentration=float(tc),
-            tc_breakdown=TCBreakdown(
-                leadership_ratio=round(leadership_ratio, 4),
-                team_size_factor=round(team_size_factor, 4),
-                skill_concentration=round(skill_concentration, 4),
-                individual_factor=round(individual_factor, 4),
-            ),
-            job_analysis=JobAnalysisOutput(
-                total_ai_jobs=job_analysis.total_ai_jobs,
-                senior_ai_jobs=job_analysis.senior_ai_jobs,
-                mid_ai_jobs=job_analysis.mid_ai_jobs,
-                entry_ai_jobs=job_analysis.entry_ai_jobs,
-                unique_skills=sorted(job_analysis.unique_skills),
-            ),
-            individual_mentions=indiv_mentions,
-            review_count=rev_count,
-            ai_mentions=ai_mentions,
-            vr_result=VRBreakdownOutput(
-                vr_score=float(vr_result.vr_score),
-                weighted_dim_score=float(vr_result.weighted_dim_score),
-                talent_risk_adj=float(vr_result.talent_risk_adj),
-            ),
-            dimension_scores=dim_score_dict,
-            validation=validation,
-            duration_seconds=round(time.time() - start, 2),
-            scored_at=datetime.now(timezone.utc).isoformat(),
-        )
-
-    except Exception as e:
-        logger.error(f"TC+VR scoring failed for {ticker}: {e}", exc_info=True)
-        return TCVRResponse(
-            ticker=ticker,
-            status="failed",
-            error=str(e),
-            duration_seconds=round(time.time() - start, 2),
-        )
-
-# =====================================================================
-# END TEMPORARY SECTION
-# =====================================================================
-
-
-# =====================================================================
-# Helper: Compute Org-AI-R (Fix #7 — no double execution)
-# =====================================================================
-
-def _compute_orgair(ticker: str, _precomputed_vr=None) -> OrgAIRResponse:
-    start = time.time()
-    ticker = ticker.upper()
-
-    try:
-        logger.info("=" * 60)
-        logger.info(f"Org-AI-R CALCULATION: {ticker}")
-        logger.info("=" * 60)
-
-        # ---- 1. Get V^R ----
-        vr_response = _precomputed_vr if _precomputed_vr is not None else _compute_tc_vr(ticker)
-
-        if vr_response.status != "success":
-            raise ValueError(f"V^R calculation failed: {vr_response.error}")
-
-        vr_score = vr_response.vr_result.vr_score if vr_response.vr_result else None
-        if vr_score is None:
-            raise ValueError("V^R score missing from TC+VR response")
-
-        logger.info(f"[{ticker}] V^R = {vr_score:.2f}")
-
-        # ---- 2. Get H^R (direct — avoids second pipeline run) ----
-        from app.scoring.hr_calculator import HRCalculator
-        from app.scoring.position_factor import PositionFactorCalculator
-
-        sector = COMPANY_SECTORS.get(ticker, "")
-        mcap = MARKET_CAP_PERCENTILES.get(ticker, 0.50)
-
-        pf = PositionFactorCalculator().calculate_position_factor(vr_score, sector, mcap)
-        hr_result = HRCalculator().calculate(sector, float(pf))
-        hr_score = float(hr_result.hr_score)
-
-        logger.info(f"[{ticker}] PF = {float(pf):.4f}")
-        logger.info(f"[{ticker}] H^R = {hr_score:.2f}")
-
-        # ---- 3. Synergy ----
-        from app.scoring.synergy_calculator import SynergyCalculator
-
-        timing = SECTOR_TIMING.get(sector, 1.0)
-        synergy_result = SynergyCalculator().calculate(vr_score, hr_score, timing_factor=timing)
-        synergy_score = float(synergy_result.synergy_score)
-        logger.info(f"[{ticker}] Synergy = {synergy_score:.2f}")
-
-        # ---- 4. Org-AI-R ----
-        from app.scoring.orgair_calculator import OrgAIRCalculator
-        orgair_result = OrgAIRCalculator().calculate(vr_score, hr_score, synergy_score)
-        org_air_score = float(orgair_result.org_air_score)
-        logger.info(f"[{ticker}] Org-AI-R = {org_air_score:.2f}")
-
-        # ---- 5. Confidence Intervals ----
-        from app.scoring.confidence_calculator import ConfidenceCalculator
-        ci_calc = ConfidenceCalculator()
-
-        vr_ci_result = ci_calc.calculate(vr_score, 7, "vr")
-        hr_ci_result = ci_calc.calculate(hr_score, 7, "hr")
-        orgair_ci_result = ci_calc.calculate(org_air_score, 7, "org_air")
-
-        vr_ci = CIBreakdown(
-            ci_lower=float(vr_ci_result.ci_lower), ci_upper=float(vr_ci_result.ci_upper),
-            sem=float(vr_ci_result.sem), reliability=float(vr_ci_result.reliability), score_type="vr",
-        )
-        hr_ci = CIBreakdown(
-            ci_lower=float(hr_ci_result.ci_lower), ci_upper=float(hr_ci_result.ci_upper),
-            sem=float(hr_ci_result.sem), reliability=float(hr_ci_result.reliability), score_type="hr",
-        )
-        orgair_ci = CIBreakdown(
-            ci_lower=float(orgair_ci_result.ci_lower), ci_upper=float(orgair_ci_result.ci_upper),
-            sem=float(orgair_ci_result.sem), reliability=float(orgair_ci_result.reliability), score_type="org_air",
-        )
-
-        logger.info(
-            f"[{ticker}] Org-AI-R CI = [{float(orgair_ci_result.ci_lower):.2f}, "
-            f"{float(orgair_ci_result.ci_upper):.2f}]  reliability={float(orgair_ci_result.reliability):.4f}"
-        )
-
-        # ---- 6. Validate ----
-        validation = None
-        if ticker in EXPECTED_ORGAIR_RANGES:
-            exp_lo, exp_hi = EXPECTED_ORGAIR_RANGES[ticker]
-            in_range = exp_lo <= org_air_score <= exp_hi
-            status = "✅" if in_range else "⚠️"
-            validation = OrgAIRValidation(
-                orgair_in_range=in_range,
-                orgair_expected=f"{exp_lo:.1f} to {exp_hi:.1f}",
-                status=status,
-            )
-            logger.info(f"[{ticker}] Validation: Org-AI-R={org_air_score:.2f} expected [{exp_lo:.1f}, {exp_hi:.1f}]  {status}")
-
-        breakdown = OrgAIRBreakdown(
-            org_air_score=org_air_score, vr_score=vr_score, hr_score=hr_score,
-            synergy_score=synergy_score, weighted_base=float(orgair_result.weighted_base),
-            synergy_contribution=float(orgair_result.synergy_contribution),
-            vr_weighted=float(orgair_result.vr_weighted), hr_weighted=float(orgair_result.hr_weighted),
-            alpha=float(orgair_result.alpha), beta=float(orgair_result.beta),
-            vr_ci=vr_ci, hr_ci=hr_ci, orgair_ci=orgair_ci,
-        )
-
-        logger.info("=" * 60)
-
-        return OrgAIRResponse(
-            ticker=ticker, status="success", org_air_score=org_air_score,
-            breakdown=breakdown, validation=validation,
-            duration_seconds=round(time.time() - start, 2),
-            scored_at=datetime.now(timezone.utc).isoformat(),
-        )
-
-    except Exception as e:
-        logger.error(f"Org-AI-R calculation failed for {ticker}: {e}", exc_info=True)
-        return OrgAIRResponse(
-            ticker=ticker, status="failed", error=str(e),
-            duration_seconds=round(time.time() - start, 2),
-        )
 
 
 # =====================================================================
@@ -524,189 +73,14 @@ def _compute_orgair(ticker: str, _precomputed_vr=None) -> OrgAIRResponse:
 )
 async def generate_results():
     """Generate results JSON files for CS3 submission."""
-    start = time.time()
-
-    logger.info("=" * 70)
-    logger.info("GENERATING CS3 RESULTS JSON FILES")
-    logger.info("=" * 70)
-
-    results_dir = Path("results")
-    results_dir.mkdir(exist_ok=True)
-
-    local_files = []
-    s3_files = []
-    summary = []
-    files_generated = 0
-
-    for ticker in CS3_PORTFOLIO:
-        logger.info(f"\n{'─'*50}")
-        logger.info(f"Scoring {ticker}...")
-
-        # 1. Compute TC+VR once; reuse for Org-AI-R to avoid a double pipeline run
-        tc_vr = _compute_tc_vr(ticker)
-
-        tc_val = tc_vr.talent_concentration if tc_vr else None
-        tc_breakdown = tc_vr.tc_breakdown if tc_vr else None
-        dim_scores = tc_vr.dimension_scores if tc_vr else None
-        job_analysis = tc_vr.job_analysis if tc_vr else None
-
-        # 2. Run Org-AI-R (pass pre-computed VR to avoid second _compute_tc_vr call)
-        response = _compute_orgair(ticker, _precomputed_vr=tc_vr)
-        if response.status != "success":
-            logger.error(f"[{ticker}] FAILED: {response.error}")
-            continue
-
-        b = response.breakdown
-
-        # 3. Get PF
-        from app.scoring.position_factor import PositionFactorCalculator
-        sector = COMPANY_SECTORS.get(ticker, "")
-        mcap = MARKET_CAP_PERCENTILES.get(ticker, 0.50)
-        pf = float(PositionFactorCalculator().calculate_position_factor(b.vr_score, sector, mcap))
-
-        # 4. Validation ranges
-        org_air_range = EXPECTED_ORGAIR_RANGES.get(ticker, (0, 100))
-        tc_range = EXPECTED_TC_RANGES.get(ticker, (0, 1))
-        pf_range = EXPECTED_PF_RANGES.get(ticker, (-1, 1))
-
-        # 5. Build result JSON
-        result_data = {
-            "ticker": ticker,
-            "company_name": COMPANY_NAMES.get(ticker, ticker),
-            "sector": sector,
-            "scored_at": datetime.now(timezone.utc).isoformat(),
-
-            "org_air_score": b.org_air_score,
-            "org_air_ci": {
-                "lower": b.orgair_ci.ci_lower if b.orgair_ci else None,
-                "upper": b.orgair_ci.ci_upper if b.orgair_ci else None,
-                "sem": b.orgair_ci.sem if b.orgair_ci else None,
-                "reliability": b.orgair_ci.reliability if b.orgair_ci else None,
-            },
-
-            "vr_score": b.vr_score,
-            "vr_ci": {
-                "lower": b.vr_ci.ci_lower if b.vr_ci else None,
-                "upper": b.vr_ci.ci_upper if b.vr_ci else None,
-            },
-
-            "hr_score": b.hr_score,
-            "hr_ci": {
-                "lower": b.hr_ci.ci_lower if b.hr_ci else None,
-                "upper": b.hr_ci.ci_upper if b.hr_ci else None,
-            },
-
-            "synergy_score": b.synergy_score,
-
-            "formula": {
-                "alpha": b.alpha,
-                "beta": b.beta,
-                "vr_weighted": b.vr_weighted,
-                "hr_weighted": b.hr_weighted,
-                "weighted_base": b.weighted_base,
-                "synergy_contribution": b.synergy_contribution,
-            },
-
-            "position_factor": pf,
-            "market_cap_percentile": mcap,
-
-            "talent_concentration": float(tc_val) if tc_val else None,
-            "tc_breakdown": tc_breakdown if tc_breakdown else None,
-
-            "dimension_scores": dim_scores if dim_scores else None,
-
-            "job_analysis": job_analysis if job_analysis else None,
-
-            "validation": {
-                "org_air_in_range": org_air_range[0] <= b.org_air_score <= org_air_range[1],
-                "org_air_expected": f"{org_air_range[0]:.1f} - {org_air_range[1]:.1f}",
-                "tc_in_range": tc_range[0] <= float(tc_val) <= tc_range[1] if tc_val else None,
-                "tc_expected": f"{tc_range[0]} - {tc_range[1]}",
-                "pf_in_range": pf_range[0] <= pf <= pf_range[1],
-                "pf_expected": f"{pf_range[0]} - {pf_range[1]}",
-            },
-        }
-
-        # 6. Save locally
-        local_path = results_dir / f"{ticker.lower()}.json"
-        local_path.write_text(json.dumps(result_data, indent=2, default=str), encoding="utf-8")
-        local_files.append(str(local_path))
-        logger.info(f"[{ticker}] ✅ Local: {local_path}")
-
-        # 7. Save to S3
-        try:
-            from app.services.s3_storage import get_s3_service
-            s3 = get_s3_service()
-            s3_key = f"scoring/results/{ticker.lower()}.json"
-            s3.upload_json(result_data, s3_key)
-            s3_files.append(s3_key)
-            logger.info(f"[{ticker}] ✅ S3: {s3_key}")
-        except Exception as e:
-            logger.warning(f"[{ticker}] S3 upload failed (non-fatal): {e}")
-
-        files_generated += 1
-
-        summary.append({
-            "ticker": ticker,
-            "org_air_score": b.org_air_score,
-            "vr_score": b.vr_score,
-            "hr_score": b.hr_score,
-            "synergy_score": b.synergy_score,
-            "tc": float(tc_val) if tc_val else None,
-            "pf": pf,
-            "in_range": result_data["validation"]["org_air_in_range"],
-        })
-
-    # 8. Save portfolio summary
-    portfolio_summary = {
-        "generated_at": datetime.now(timezone.utc).isoformat(),
-        "pipeline": "CS3 Org-AI-R Scoring Engine",
-        "companies": files_generated,
-        "all_in_range": all(s["in_range"] for s in summary),
-        "results": summary,
-    }
-
-    summary_local = results_dir / "portfolio_summary.json"
-    summary_local.write_text(json.dumps(portfolio_summary, indent=2, default=str), encoding="utf-8")
-    local_files.append(str(summary_local))
-
-    try:
-        from app.services.s3_storage import get_s3_service
-        s3 = get_s3_service()
-        s3.upload_json(portfolio_summary, "scoring/results/portfolio_summary.json")
-        s3_files.append("scoring/results/portfolio_summary.json")
-    except Exception:
-        pass
-
-    # 9. Print final table
-    logger.info(f"\n{'='*70}")
-    logger.info(f"CS3 RESULTS — FINAL SCORES")
-    logger.info(f"{'='*70}")
-    logger.info(f"{'Ticker':<6} {'Org-AI-R':>9} {'V^R':>7} {'H^R':>7} {'Syn':>7} {'TC':>7} {'PF':>7} {'Range':>12} {'✓':>3}")
-    logger.info(f"{'-'*6} {'-'*9} {'-'*7} {'-'*7} {'-'*7} {'-'*7} {'-'*7} {'-'*12} {'-'*3}")
-    for s in summary:
-        exp = EXPECTED_ORGAIR_RANGES.get(s["ticker"], (0, 100))
-        status = "✅" if s["in_range"] else "⚠️"
-        logger.info(
-            f"{s['ticker']:<6} {s['org_air_score']:>9.2f} {s['vr_score']:>7.2f} "
-            f"{s['hr_score']:>7.2f} {s['synergy_score']:>7.2f} "
-            f"{s['tc']:>7.4f} {s['pf']:>7.4f} "
-            f"{exp[0]:.0f}-{exp[1]:.0f}:>12 {status:>3}"
-        )
-    logger.info(f"{'='*70}")
-
-    passed = sum(1 for s in summary if s["in_range"])
-    logger.info(f"Validation: {passed}/{len(summary)} within expected range")
-    logger.info(f"Files: {len(local_files)} local, {len(s3_files)} S3")
-    logger.info(f"Duration: {time.time() - start:.2f}s")
-
+    result = get_composite_scoring_service().compute_full_pipeline(CS3_PORTFOLIO)
     return ResultsGenerationResponse(
         status="success",
-        files_generated=files_generated,
-        local_files=local_files,
-        s3_files=s3_files,
-        summary=summary,
-        duration_seconds=round(time.time() - start, 2),
+        files_generated=result["files_generated"],
+        local_files=result["local_files"],
+        s3_files=result["s3_files"],
+        summary=result["summary"],
+        duration_seconds=result["duration_seconds"],
     )
 
 
@@ -722,6 +96,7 @@ async def generate_results():
 async def score_portfolio_orgair():
     """Calculate Org-AI-R for all 5 companies."""
     start = time.time()
+    svc = get_composite_scoring_service()
 
     logger.info("=" * 70)
     logger.info("Org-AI-R PORTFOLIO SCORING — 5 COMPANIES")
@@ -732,11 +107,10 @@ async def score_portfolio_orgair():
     failed = 0
 
     for ticker in CS3_PORTFOLIO:
-        result = _compute_orgair(ticker)
+        result = svc.compute_orgair(ticker)
         results.append(result)
         if result.status == "success":
             scored += 1
-            _save_orgair_result(result)
         else:
             failed += 1
 
@@ -745,7 +119,10 @@ async def score_portfolio_orgair():
     logger.info("=" * 70)
     logger.info("Org-AI-R SUMMARY TABLE")
     logger.info("=" * 70)
-    logger.info(f"{'Ticker':<8} {'V^R':>8} {'H^R':>8} {'Synergy':>9} {'Org-AI-R':>10} {'Range':>15} {'✓':>3}")
+    logger.info(
+        f"{'Ticker':<8} {'V^R':>8} {'H^R':>8} {'Synergy':>9} "
+        f"{'Org-AI-R':>10} {'Range':>15} {'✓':>3}"
+    )
     logger.info("-" * 70)
 
     for r in results:
@@ -759,10 +136,16 @@ async def score_portfolio_orgair():
                 f"{range_str:>15} {val_status:>3}"
             )
             summary.append({
-                "ticker": r.ticker, "vr_score": b.vr_score, "hr_score": b.hr_score,
-                "synergy_score": b.synergy_score, "org_air_score": b.org_air_score,
-                "weighted_base": b.weighted_base, "synergy_contribution": b.synergy_contribution,
-                "orgair_in_expected_range": r.validation.orgair_in_range if r.validation else None,
+                "ticker": r.ticker,
+                "vr_score": b.vr_score,
+                "hr_score": b.hr_score,
+                "synergy_score": b.synergy_score,
+                "org_air_score": b.org_air_score,
+                "weighted_base": b.weighted_base,
+                "synergy_contribution": b.synergy_contribution,
+                "orgair_in_expected_range": (
+                    r.validation.orgair_in_range if r.validation else None
+                ),
             })
         else:
             logger.info(f"{r.ticker:<8} FAILED: {r.error}")
@@ -778,8 +161,10 @@ async def score_portfolio_orgair():
 
     return PortfolioOrgAIRResponse(
         status="success" if failed == 0 else "partial",
-        companies_scored=scored, companies_failed=failed,
-        results=results, summary_table=summary,
+        companies_scored=scored,
+        companies_failed=failed,
+        results=results,
+        summary_table=summary,
         duration_seconds=round(time.time() - start, 2),
     )
 
@@ -795,45 +180,7 @@ async def score_portfolio_orgair():
 )
 async def score_orgair(ticker: str):
     """Calculate Org-AI-R for one company."""
-    result = _compute_orgair(ticker.upper())
-    if result.status == "success":
-        _save_orgair_result(result)
-    return result
-
-
-# =====================================================================
-# Persistence helpers
-# =====================================================================
-
-def _save_orgair_result(result: OrgAIRResponse) -> None:
-    ticker = result.ticker
-    try:
-        from app.services.s3_storage import get_s3_service
-        s3 = get_s3_service()
-        ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-        s3_key = f"scoring/orgair/{ticker}/{ts}.json"
-        s3.upload_json(result.model_dump(), s3_key)
-        logger.info(f"  ✅ Uploaded to S3: {s3_key}")
-    except Exception as e:
-        logger.warning(f"[{ticker}] S3 save failed (non-fatal): {e}")
-
-    try:
-        b = result.breakdown
-        if b:
-            ci_lower = b.orgair_ci.ci_lower if b.orgair_ci else None
-            ci_upper = b.orgair_ci.ci_upper if b.orgair_ci else None
-            get_composite_scoring_repo().upsert_orgair_result(
-                ticker,
-                org_air=b.org_air_score,
-                vr_score=b.vr_score,
-                hr_score=b.hr_score,
-                synergy_score=b.synergy_score,
-                ci_lower=ci_lower,
-                ci_upper=ci_upper,
-            )
-        logger.info(f"[{ticker}] SCORING table upserted: org_air={result.org_air_score}")
-    except Exception as e:
-        logger.warning(f"[{ticker}] Snowflake SCORING upsert failed (non-fatal): {e}")
+    return get_composite_scoring_service().compute_orgair(ticker.upper())
 
 
 # =====================================================================
@@ -858,14 +205,18 @@ def _fetch_orgair_row(ticker: str) -> Optional[OrgAIRScoringRecord]:
     if not row:
         return None
     return OrgAIRScoringRecord(
-        ticker=row["TICKER"], org_air=row.get("ORG_AIR"),
+        ticker=row["TICKER"],
+        org_air=row.get("ORG_AIR"),
         scored_at=str(row["SCORED_AT"]) if row.get("SCORED_AT") else None,
         updated_at=str(row["UPDATED_AT"]) if row.get("UPDATED_AT") else None,
     )
 
 
-@router.get("/orgair/portfolio", response_model=PortfolioOrgAIRScoringResponse,
-            summary="Get last computed Org-AI-R for all 5 CS3 companies (from Snowflake)")
+@router.get(
+    "/orgair/portfolio",
+    response_model=PortfolioOrgAIRScoringResponse,
+    summary="Get last computed Org-AI-R for all 5 CS3 companies (from Snowflake)",
+)
 async def get_portfolio_orgair():
     results = []
     for ticker in CS3_PORTFOLIO:
@@ -878,16 +229,22 @@ async def get_portfolio_orgair():
 
     scored = sum(1 for r in results if r.org_air is not None)
     return PortfolioOrgAIRScoringResponse(
-        status="ok", results=results,
+        status="ok",
+        results=results,
         message=f"{scored}/{len(CS3_PORTFOLIO)} companies have stored Org-AI-R scores",
     )
 
 
-@router.get("/orgair/{ticker}", response_model=OrgAIRScoringRecord,
-            summary="Get last computed Org-AI-R for one company (from Snowflake)")
+@router.get(
+    "/orgair/{ticker}",
+    response_model=OrgAIRScoringRecord,
+    summary="Get last computed Org-AI-R for one company (from Snowflake)",
+)
 async def get_orgair(ticker: str):
-    from fastapi import HTTPException
     row = _fetch_orgair_row(ticker.upper())
     if not row:
-        raise HTTPException(status_code=404, detail=f"No scoring record for {ticker.upper()}. Run POST first.")
+        raise HTTPException(
+            status_code=404,
+            detail=f"No scoring record for {ticker.upper()}. Run POST first.",
+        )
     return row
