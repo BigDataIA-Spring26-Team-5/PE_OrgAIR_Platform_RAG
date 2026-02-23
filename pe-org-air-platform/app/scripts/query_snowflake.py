@@ -16,7 +16,7 @@ from datetime import datetime
 project_root = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(project_root))
 
-from app.services.snowflake import get_snowflake_connection
+from app.repositories.base import get_snowflake_connection
 
 
 def timed_query(cur, query, description="Query"):

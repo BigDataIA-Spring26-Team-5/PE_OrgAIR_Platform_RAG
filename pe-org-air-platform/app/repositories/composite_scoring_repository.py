@@ -17,10 +17,11 @@ no SQL semantics were altered.
 """
 from typing import Dict, List, Optional
 
+from app.repositories.base import BaseRepository
 from app.services.utils import make_singleton_factory
 
 
-class CompositeScoringRepository:
+class CompositeScoringRepository(BaseRepository):
     """Read + write access to SCORING-family tables in Snowflake."""
 
     # =====================================================================
@@ -29,12 +30,10 @@ class CompositeScoringRepository:
 
     def _query(self, ticker: str, columns: List[str]) -> Optional[Dict]:
         """Execute SELECT <columns> FROM SCORING WHERE ticker = %s."""
-        from app.services.snowflake import get_snowflake_connection
         from snowflake.connector import DictCursor
 
         cols = ", ".join(columns)
-        conn = get_snowflake_connection()
-        try:
+        with self.get_connection() as conn:
             cursor = conn.cursor(DictCursor)
             cursor.execute(
                 f"SELECT {cols} FROM SCORING WHERE ticker = %s",
@@ -43,21 +42,14 @@ class CompositeScoringRepository:
             row = cursor.fetchone()
             cursor.close()
             return row or None
-        finally:
-            conn.close()
 
     def _execute(self, sql: str, params: list) -> None:
         """Execute a DML statement (MERGE/INSERT/UPDATE) and commit."""
-        from app.services.snowflake import get_snowflake_connection
-
-        conn = get_snowflake_connection()
-        try:
+        with self.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(sql, params)
             conn.commit()
             cursor.close()
-        finally:
-            conn.close()
 
     # =====================================================================
     # READ — fetch rows from SCORING

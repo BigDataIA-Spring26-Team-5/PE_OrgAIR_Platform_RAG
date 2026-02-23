@@ -14,10 +14,10 @@ from uuid import UUID
 
 import snowflake.connector
 
-from app.services.snowflake import get_snowflake_connection
+from app.repositories.base import BaseRepository
 
 
-class SignalScoresRepository:
+class SignalScoresRepository(BaseRepository):
     """
     Repository for storing and retrieving company signal scores from Snowflake.
 
@@ -27,8 +27,6 @@ class SignalScoresRepository:
 
     TABLE_NAME = "SIGNAL_SCORES"
 
-    def __init__(self):
-        self.conn = get_snowflake_connection()
 
     def upsert_signal_scores(
         self,
@@ -140,13 +138,14 @@ class SignalScoresRepository:
             now,
         )
 
-        cur = self.conn.cursor()
-        try:
-            cur.execute(sql, params)
-            self.conn.commit()
-            return ticker_upper
-        finally:
-            cur.close()
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            try:
+                cur.execute(sql, params)
+                conn.commit()
+                return ticker_upper
+            finally:
+                cur.close()
 
     def get_by_ticker(self, ticker: str) -> Optional[Dict]:
         """
@@ -171,15 +170,16 @@ class SignalScoresRepository:
         WHERE ticker = %s
         """
 
-        cur = self.conn.cursor(snowflake.connector.DictCursor)
-        try:
-            cur.execute(sql, (ticker.upper(),))
-            row = cur.fetchone()
-            if not row:
-                return None
-            return self._row_to_dict(row)
-        finally:
-            cur.close()
+        with self.get_connection() as conn:
+            cur = conn.cursor(snowflake.connector.DictCursor)
+            try:
+                cur.execute(sql, (ticker.upper(),))
+                row = cur.fetchone()
+                if not row:
+                    return None
+                return self._row_to_dict(row)
+            finally:
+                cur.close()
 
     def get_by_company_id(self, company_id: str) -> Optional[Dict]:
         """
@@ -204,15 +204,16 @@ class SignalScoresRepository:
         WHERE company_id = %s
         """
 
-        cur = self.conn.cursor(snowflake.connector.DictCursor)
-        try:
-            cur.execute(sql, (company_id,))
-            row = cur.fetchone()
-            if not row:
-                return None
-            return self._row_to_dict(row)
-        finally:
-            cur.close()
+        with self.get_connection() as conn:
+            cur = conn.cursor(snowflake.connector.DictCursor)
+            try:
+                cur.execute(sql, (company_id,))
+                row = cur.fetchone()
+                if not row:
+                    return None
+                return self._row_to_dict(row)
+            finally:
+                cur.close()
 
     def get_all(self) -> List[Dict]:
         """
@@ -234,12 +235,13 @@ class SignalScoresRepository:
         ORDER BY updated_at DESC
         """
 
-        cur = self.conn.cursor(snowflake.connector.DictCursor)
-        try:
-            cur.execute(sql)
-            return [self._row_to_dict(row) for row in cur.fetchall()]
-        finally:
-            cur.close()
+        with self.get_connection() as conn:
+            cur = conn.cursor(snowflake.connector.DictCursor)
+            try:
+                cur.execute(sql)
+                return [self._row_to_dict(row) for row in cur.fetchall()]
+            finally:
+                cur.close()
 
     def delete_by_ticker(self, ticker: str) -> bool:
         """
@@ -253,13 +255,14 @@ class SignalScoresRepository:
         """
         sql = "DELETE FROM SIGNAL_SCORES WHERE ticker = %s"
 
-        cur = self.conn.cursor()
-        try:
-            cur.execute(sql, (ticker.upper(),))
-            self.conn.commit()
-            return cur.rowcount > 0
-        finally:
-            cur.close()
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            try:
+                cur.execute(sql, (ticker.upper(),))
+                conn.commit()
+                return cur.rowcount > 0
+            finally:
+                cur.close()
 
     def _row_to_dict(self, row: Dict) -> Dict:
         """Convert Snowflake row to signal scores dict."""
@@ -283,52 +286,4 @@ class SignalScoresRepository:
             "updated_at": row.get("UPDATED_AT"),
         }
 
-    def close(self):
-        """Close the database connection."""
-        try:
-            self.conn.close()
-        except Exception:
-            pass
 
-
-def calculate_composite_score(
-    hiring_score: Optional[float] = None,
-    innovation_score: Optional[float] = None,
-    tech_stack_score: Optional[float] = None,
-    leadership_score: Optional[float] = None,
-) -> Optional[float]:
-    """
-    Calculate composite score from individual signal scores.
-
-    Uses equal weighting for available scores.
-    Leadership score is optional (can be None/blank).
-
-    Formula: Average of available scores
-    - If all 4 available: (hiring + innovation + tech + leadership) / 4
-    - If 3 available (no leadership): (hiring + innovation + tech) / 3
-    - Returns None if no scores available
-
-    Args:
-        hiring_score: Job market/hiring score (0-100)
-        innovation_score: Patent/innovation score (0-100)
-        tech_stack_score: Tech stack score (0-100)
-        leadership_score: Leadership score (0-100), optional
-
-    Returns:
-        Composite score (0-100) or None if no scores available
-    """
-    scores = []
-
-    if hiring_score is not None:
-        scores.append(hiring_score)
-    if innovation_score is not None:
-        scores.append(innovation_score)
-    if tech_stack_score is not None:
-        scores.append(tech_stack_score)
-    if leadership_score is not None:
-        scores.append(leadership_score)
-
-    if not scores:
-        return None
-
-    return round(sum(scores) / len(scores), 2)

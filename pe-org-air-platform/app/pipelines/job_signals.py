@@ -478,88 +478,84 @@ def step4_score_job_market(state: SignalPipelineState) -> SignalPipelineState:
 
 def step5_store_to_s3_and_snowflake(state: SignalPipelineState) -> SignalPipelineState:
     from app.services.s3_storage import get_s3_service
-    from app.services.snowflake import SnowflakeService
+    from app.repositories.signal_repository import get_signal_repository
 
     logger.info("-" * 40)
     logger.info("☁️ [5/5] STORING TO S3 & SNOWFLAKE")
 
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     s3 = get_s3_service()
-    db = SnowflakeService()
+    signal_repo = get_signal_repository()
 
-    try:
-        company_jobs: Dict[str, List] = defaultdict(list)
-        for p in state.job_postings:
-            company_jobs[p["company_id"]].append(p)
+    company_jobs: Dict[str, List] = defaultdict(list)
+    for p in state.job_postings:
+        company_jobs[p["company_id"]].append(p)
 
-        for cid, jobs in company_jobs.items():
-            if not jobs:
-                continue
+    for cid, jobs in company_jobs.items():
+        if not jobs:
+            continue
 
-            company_name = jobs[0].get("company_name", cid)
-            ticker = None
-            for c in state.companies:
-                if c.get("id") == cid:
-                    ticker = c.get("ticker", "").upper()
-                    break
-            ticker = ticker or safe_filename(company_name).upper()
+        company_name = jobs[0].get("company_name", cid)
+        ticker = None
+        for c in state.companies:
+            if c.get("id") == cid:
+                ticker = c.get("ticker", "").upper()
+                break
+        ticker = ticker or safe_filename(company_name).upper()
 
-            analysis = state.job_market_analyses.get(cid, {})
-            score = state.job_market_scores.get(cid, 0.0)
+        analysis = state.job_market_analyses.get(cid, {})
+        score = state.job_market_scores.get(cid, 0.0)
 
-            s3_key = f"signals/jobs/{ticker}/{timestamp}.json"
-            s3.upload_json(
-                {
-                    "company_id": cid,
-                    "company_name": company_name,
-                    "ticker": ticker,
-                    "collection_date": timestamp,
-                    "total_jobs": len(jobs),
-                    "total_tech_jobs": analysis.get("total_tech_jobs", 0),
-                    "ai_jobs": analysis.get("ai_jobs", 0),
-                    "job_market_score": score,
-                    "score_breakdown": analysis.get("score_breakdown", {}),
-                    "jobs": jobs,
-                },
-                s3_key,
-            )
-            logger.info(f"   📤 S3: {s3_key}")
+        s3_key = f"signals/jobs/{ticker}/{timestamp}.json"
+        s3.upload_json(
+            {
+                "company_id": cid,
+                "company_name": company_name,
+                "ticker": ticker,
+                "collection_date": timestamp,
+                "total_jobs": len(jobs),
+                "total_tech_jobs": analysis.get("total_tech_jobs", 0),
+                "ai_jobs": analysis.get("ai_jobs", 0),
+                "job_market_score": score,
+                "score_breakdown": analysis.get("score_breakdown", {}),
+                "jobs": jobs,
+            },
+            s3_key,
+        )
+        logger.info(f"   📤 S3: {s3_key}")
 
-            ai_count = analysis.get("ai_jobs", 0)
-            sources = list({j.get("source", "other") for j in jobs})
-            primary_src = max(
-                defaultdict(int, {j.get("source", "other"): 1 for j in jobs}),
-                key=lambda k: sum(1 for j in jobs if j.get("source") == k),
-                default="other",
-            )
+        ai_count = analysis.get("ai_jobs", 0)
+        sources = list({j.get("source", "other") for j in jobs})
+        primary_src = max(
+            defaultdict(int, {j.get("source", "other"): 1 for j in jobs}),
+            key=lambda k: sum(1 for j in jobs if j.get("source") == k),
+            default="other",
+        )
 
-            db.insert_external_signal(
-                signal_id=f"{cid}_job_market_{timestamp}",
-                company_id=cid,
-                category="job_market",
-                source=primary_src,
-                score=score,
-                evidence_count=ai_count,
-                summary=f"Found {ai_count} AI roles out of {analysis.get('total_tech_jobs', 0)} tech jobs ({len(jobs)} total)",
-                raw_payload={
-                    "collection_date": timestamp,
-                    "s3_key": s3_key,
-                    "total_jobs": len(jobs),
-                    "total_tech_jobs": analysis.get("total_tech_jobs", 0),
-                    "ai_jobs": ai_count,
-                    "ai_ratio": analysis.get("ai_ratio", 0),
-                    "score_breakdown": analysis.get("score_breakdown", {}),
-                    "confidence": analysis.get("confidence", 0.5),
-                    "ai_skills": analysis.get("ai_skills", []),
-                    "sources": sources,
-                },
-            )
-            logger.info(f"   💾 Snowflake: {company_name} (score: {score})")
+        signal_repo.create_signal(
+            company_id=cid,
+            category="job_market",
+            source=primary_src,
+            signal_date=datetime.now(timezone.utc),
+            raw_value=f"Found {ai_count} AI roles out of {analysis.get('total_tech_jobs', 0)} tech jobs ({len(jobs)} total)",
+            normalized_score=score,
+            confidence=analysis.get("confidence", 0.5),
+            metadata={
+                "collection_date": timestamp,
+                "s3_key": s3_key,
+                "total_jobs": len(jobs),
+                "total_tech_jobs": analysis.get("total_tech_jobs", 0),
+                "ai_jobs": ai_count,
+                "ai_ratio": analysis.get("ai_ratio", 0),
+                "score_breakdown": analysis.get("score_breakdown", {}),
+                "ai_skills": analysis.get("ai_skills", []),
+                "sources": sources,
+            },
+        )
+        logger.info(f"   💾 Snowflake: {company_name} (score: {score})")
 
-        logger.info(f"   ✅ Stored {len(company_jobs)} companies to S3 + Snowflake")
-        return state
-    finally:
-        db.close()
+    logger.info(f"   ✅ Stored {len(company_jobs)} companies to S3 + Snowflake")
+    return state
 
 
 # ---------------------------------------------------------------------------

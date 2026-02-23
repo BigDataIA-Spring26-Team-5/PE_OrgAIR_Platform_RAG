@@ -7,20 +7,19 @@ _fetch_*_row() helpers that were duplicated across 4 scoring routers.
 """
 from typing import Dict, List, Optional
 
+from app.repositories.base import BaseRepository
 from app.services.utils import make_singleton_factory
 
 
-class ScoringReadRepository:
+class ScoringReadRepository(BaseRepository):
     """Fetch rows from the Snowflake SCORING table."""
 
     def _query(self, ticker: str, columns: List[str]) -> Optional[Dict]:
         """Execute SELECT <columns> FROM SCORING WHERE ticker = %s."""
-        from app.services.snowflake import get_snowflake_connection
         from snowflake.connector import DictCursor
 
         cols = ", ".join(columns)
-        conn = get_snowflake_connection()
-        try:
+        with self.get_connection() as conn:
             cursor = conn.cursor(DictCursor)
             cursor.execute(
                 f"SELECT {cols} FROM SCORING WHERE ticker = %s",
@@ -29,8 +28,6 @@ class ScoringReadRepository:
             row = cursor.fetchone()
             cursor.close()
             return row or None
-        finally:
-            conn.close()
 
     def fetch_tc_vr_row(self, ticker: str) -> Optional[Dict]:
         """Fetch TC, VR, PF, HR columns for one ticker."""

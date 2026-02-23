@@ -12,16 +12,14 @@ Follows existing repo pattern: singleton, get_snowflake_connection(), cursor-bas
 import logging
 from typing import Dict, List, Optional
 from uuid import uuid4
-from app.services.snowflake import get_snowflake_connection
+from app.repositories.base import BaseRepository
 
 logger = logging.getLogger(__name__)
 
 
-class ScoringRepository:
+class ScoringRepository(BaseRepository):
     """Repository for CS3 scoring tables in Snowflake."""
 
-    def __init__(self):
-        self.conn = get_snowflake_connection()
 
     # =====================================================================
     # signal_dimension_mapping — the mapping matrix (Table 1) per ticker
@@ -83,17 +81,18 @@ class ScoringRepository:
             data_infrastructure, ai_governance, technology_stack,
             talent_skills, leadership_vision, use_case_portfolio, culture_change,
         )
-        cur = self.conn.cursor()
-        try:
-            cur.execute(sql, params)
-            self.conn.commit()
-            return row_id
-        except Exception as e:
-            logger.error(f"Failed to upsert mapping row: {e}")
-            self.conn.rollback()
-            raise
-        finally:
-            cur.close()
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            try:
+                cur.execute(sql, params)
+                conn.commit()
+                return row_id
+            except Exception as e:
+                logger.error(f"Failed to upsert mapping row: {e}")
+                conn.rollback()
+                raise
+            finally:
+                cur.close()
 
     def upsert_mapping_matrix(self, rows: List[Dict]) -> int:
         """
@@ -147,13 +146,14 @@ class ScoringRepository:
             ELSE 10
         END
         """
-        cur = self.conn.cursor()
-        try:
-            cur.execute(sql, (ticker.upper(),))
-            columns = [col[0].lower() for col in cur.description]
-            return [dict(zip(columns, row)) for row in cur.fetchall()]
-        finally:
-            cur.close()
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            try:
+                cur.execute(sql, (ticker.upper(),))
+                columns = [col[0].lower() for col in cur.description]
+                return [dict(zip(columns, row)) for row in cur.fetchall()]
+            finally:
+                cur.close()
 
     def get_all_mapping_matrices(self) -> List[Dict]:
         """Get mapping matrices for all tickers."""
@@ -175,24 +175,26 @@ class ScoringRepository:
             ELSE 10
         END
         """
-        cur = self.conn.cursor()
-        try:
-            cur.execute(sql)
-            columns = [col[0].lower() for col in cur.description]
-            return [dict(zip(columns, row)) for row in cur.fetchall()]
-        finally:
-            cur.close()
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            try:
+                cur.execute(sql)
+                columns = [col[0].lower() for col in cur.description]
+                return [dict(zip(columns, row)) for row in cur.fetchall()]
+            finally:
+                cur.close()
 
     def delete_mapping_matrix(self, ticker: str) -> int:
         """Delete all mapping rows for a ticker."""
         sql = "DELETE FROM signal_dimension_mapping WHERE ticker = %s"
-        cur = self.conn.cursor()
-        try:
-            cur.execute(sql, (ticker.upper(),))
-            self.conn.commit()
-            return cur.rowcount
-        finally:
-            cur.close()
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            try:
+                cur.execute(sql, (ticker.upper(),))
+                conn.commit()
+                return cur.rowcount
+            finally:
+                cur.close()
 
     # =====================================================================
     # evidence_dimension_scores — 7 aggregated dimension scores per ticker
@@ -234,17 +236,18 @@ class ScoringRepository:
             # INSERT
             row_id, ticker.upper(), dimension, score, confidence, source_count, sources, total_weight,
         )
-        cur = self.conn.cursor()
-        try:
-            cur.execute(sql, params)
-            self.conn.commit()
-            return row_id
-        except Exception as e:
-            logger.error(f"Failed to upsert dimension score: {e}")
-            self.conn.rollback()
-            raise
-        finally:
-            cur.close()
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            try:
+                cur.execute(sql, params)
+                conn.commit()
+                return row_id
+            except Exception as e:
+                logger.error(f"Failed to upsert dimension score: {e}")
+                conn.rollback()
+                raise
+            finally:
+                cur.close()
 
     def upsert_dimension_scores(self, rows: List[Dict]) -> int:
         """
@@ -288,13 +291,14 @@ class ScoringRepository:
             ELSE 8
         END
         """
-        cur = self.conn.cursor()
-        try:
-            cur.execute(sql, (ticker.upper(),))
-            columns = [col[0].lower() for col in cur.description]
-            return [dict(zip(columns, row)) for row in cur.fetchall()]
-        finally:
-            cur.close()
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            try:
+                cur.execute(sql, (ticker.upper(),))
+                columns = [col[0].lower() for col in cur.description]
+                return [dict(zip(columns, row)) for row in cur.fetchall()]
+            finally:
+                cur.close()
 
     def get_all_dimension_scores(self) -> List[Dict]:
         """Get dimension scores for all tickers."""
@@ -312,24 +316,26 @@ class ScoringRepository:
             ELSE 8
         END
         """
-        cur = self.conn.cursor()
-        try:
-            cur.execute(sql)
-            columns = [col[0].lower() for col in cur.description]
-            return [dict(zip(columns, row)) for row in cur.fetchall()]
-        finally:
-            cur.close()
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            try:
+                cur.execute(sql)
+                columns = [col[0].lower() for col in cur.description]
+                return [dict(zip(columns, row)) for row in cur.fetchall()]
+            finally:
+                cur.close()
 
     def delete_dimension_scores(self, ticker: str) -> int:
         """Delete dimension scores for a ticker."""
         sql = "DELETE FROM evidence_dimension_scores WHERE ticker = %s"
-        cur = self.conn.cursor()
-        try:
-            cur.execute(sql, (ticker.upper(),))
-            self.conn.commit()
-            return cur.rowcount
-        finally:
-            cur.close()
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            try:
+                cur.execute(sql, (ticker.upper(),))
+                conn.commit()
+                return cur.rowcount
+            finally:
+                cur.close()
 
     def upsert_culture_mapping(self, ticker: str, signal_data: dict) -> bool:
         """

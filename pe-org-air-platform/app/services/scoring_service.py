@@ -21,14 +21,14 @@ from typing import Dict, List, Optional, Any
 from datetime import datetime, timezone
 
 from app.scoring.evidence_mapper import (
-from app.services.utils import make_singleton_factory
     EvidenceMapper, EvidenceScore, SignalSource, Dimension,
 )
 from app.scoring.rubric_scorer import RubricScorer
 from app.repositories.scoring_repository import get_scoring_repository
 from app.repositories.signal_repository import get_signal_repository
+from app.repositories.chunk_repository import get_chunk_repository
 from app.repositories.company_repository import CompanyRepository
-from app.services.snowflake import get_snowflake_connection
+from app.services.utils import make_singleton_factory
 
 logger = logging.getLogger(__name__)
 
@@ -57,7 +57,6 @@ class ScoringService:
         self.scoring_repo = get_scoring_repository()
         self.signal_repo = get_signal_repository()
         self.company_repo = CompanyRepository()
-        self.conn = get_snowflake_connection()
         self._s3_chunk_cache: Dict[str, List[Dict]] = {}
 
     def score_company(self, ticker: str) -> Dict[str, Any]:
@@ -433,25 +432,7 @@ class ScoringService:
 
     def _get_section_text(self, ticker: str, section_names: List[str]) -> Optional[str]:
         """Get concatenated section text from S3 chunk files."""
-        placeholders = ", ".join(["%s"] * len(section_names))
-        sql = f"""
-        SELECT DISTINCT dc.s3_key
-        FROM document_chunks dc
-        JOIN documents d ON dc.document_id = d.id
-        WHERE d.ticker = %s
-        AND d.filing_type = '10-K'
-        AND LOWER(dc.section) IN ({placeholders})
-        AND d.status IN ('chunked', 'indexed', 'parsed')
-        AND dc.s3_key IS NOT NULL
-        """
-        params = [ticker.upper()] + [s.lower() for s in section_names]
-
-        cur = self.conn.cursor()
-        try:
-            cur.execute(sql, params)
-            s3_keys = [row[0] for row in cur.fetchall() if row[0]]
-        finally:
-            cur.close()
+        s3_keys = get_chunk_repository().get_s3_keys_by_sections(ticker, section_names)
 
         if not s3_keys:
             return None
@@ -492,21 +473,7 @@ class ScoringService:
                 return "\n\n".join(c.get("content", "") for c in chunks if c.get("content"))
             return None
 
-        sql = """
-        SELECT DISTINCT dc.s3_key
-        FROM document_chunks dc
-        JOIN documents d ON dc.document_id = d.id
-        WHERE d.ticker = %s
-        AND d.filing_type = '10-K'
-        AND d.status IN ('chunked', 'indexed', 'parsed')
-        AND dc.s3_key IS NOT NULL
-        """
-        cur = self.conn.cursor()
-        try:
-            cur.execute(sql, [ticker.upper()])
-            s3_keys = [row[0] for row in cur.fetchall() if row[0]]
-        finally:
-            cur.close()
+        s3_keys = get_chunk_repository().get_all_s3_keys(ticker)
 
         if not s3_keys:
             self._s3_chunk_cache[cache_key] = []

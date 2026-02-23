@@ -11,7 +11,7 @@ from app.services.redis_cache import get_redis_cache
 from app.services.cache import get_cache
 from app.services.redis_cache import RedisCache
 from app.services.s3_storage import get_s3_service
-from app.services.snowflake import get_snowflake_connection, SnowflakeService
+from app.repositories.base import get_snowflake_connection
 
 
 def get_document_collector_service():
@@ -74,7 +74,6 @@ __all__ = [
     "RedisCache",
     "get_s3_service",
     "get_snowflake_connection",
-    "SnowflakeService",
 
     # Data services
     "get_job_data_service",

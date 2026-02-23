@@ -31,7 +31,6 @@ from app.pipelines.job_signals import run_job_signals
 from app.pipelines.patent_signals import run_patent_signals
 from app.pipelines.utils import Company, safe_filename
 from app.services.s3_storage import S3Storage
-from app.services.snowflake import SnowflakeService
 
 logger = logging.getLogger(__name__)
 load_dotenv()
@@ -43,16 +42,6 @@ class Pipeline2Runner:
     def __init__(self):
         self.state = SignalPipelineState()
         self.s3 = S3Storage()
-        self.snowflake = None
-
-    def _init_snowflake(self):
-        if self.snowflake is None:
-            self.snowflake = SnowflakeService()
-
-    def _close_snowflake(self):
-        if self.snowflake:
-            self.snowflake.close()
-            self.snowflake = None
 
     # ------------------------------------------------------------------
     # STEP 1: EXTRACT DATA
@@ -275,39 +264,38 @@ class Pipeline2Runner:
         if not self.state.is_step_complete("s3_upload"):
             return {"status": "error", "message": "S3 upload step not complete"}
 
-        self._init_snowflake()
+        from app.repositories.signal_repository import get_signal_repository
 
-        try:
-            inserts = 0
-            for c in self.state.companies:
-                cid = c.get("id", "")
-                name = c.get("name", "")
-                job_score = self.state.job_market_scores.get(cid, 0)
-                patent_score = self.state.patent_scores.get(cid, 0)
+        signal_repo = get_signal_repository()
+        inserts = 0
+        for c in self.state.companies:
+            cid = c.get("id", "")
+            name = c.get("name", "")
+            ticker = c.get("ticker", "").upper()
+            job_score = self.state.job_market_scores.get(cid, 0)
+            patent_score = self.state.patent_scores.get(cid, 0)
 
-                if job_score > 0 or patent_score > 0:
-                    try:
-                        scores = [s for s in (job_score, patent_score) if s > 0]
-                        total = sum(scores) / len(scores) if scores else 0
-
-                        self.snowflake.insert_company_signal_summary(
+            if job_score > 0 or patent_score > 0:
+                try:
+                    if job_score > 0:
+                        signal_repo.upsert_summary(
                             company_id=cid,
-                            company_name=name,
-                            job_market_score=job_score,
-                            patent_portfolio_score=patent_score,
-                            techstack_score=0,  # Now handled by tech_signals.py separately
-                            total_score=total,
-                            calculated_at=datetime.now(timezone.utc),
+                            ticker=ticker,
+                            hiring_score=job_score,
                         )
-                        inserts += 1
-                        print(f"  ✓ {name}: Job={job_score:.1f}, Patent={patent_score:.1f}")
-                    except Exception as e:
-                        print(f"  ✗ {name}: {e}")
+                    if patent_score > 0:
+                        signal_repo.upsert_summary(
+                            company_id=cid,
+                            ticker=ticker,
+                            innovation_score=patent_score,
+                        )
+                    inserts += 1
+                    print(f"  ✓ {name}: Job={job_score:.1f}, Patent={patent_score:.1f}")
+                except Exception as e:
+                    print(f"  ✗ {name}: {e}")
 
-            self.state.mark_step_complete("snowflake_write")
-            return {"status": "success", "inserts": inserts}
-        finally:
-            self._close_snowflake()
+        self.state.mark_step_complete("snowflake_write")
+        return {"status": "success", "inserts": inserts}
 
     # ------------------------------------------------------------------
     # COMPLETE PIPELINE

@@ -3,16 +3,14 @@ from __future__ import annotations
 from typing import List, Dict, Optional
 from uuid import UUID, uuid4
 
-from app.services.snowflake import get_snowflake_connection
+from app.repositories.base import BaseRepository
 
 
-class CompanyRepository:
+class CompanyRepository(BaseRepository):
     """
     Repository for accessing companies from Snowflake.
     """
 
-    def __init__(self):
-        self.conn = get_snowflake_connection()
 
     def get_all(self) -> List[Dict]:
         """
@@ -33,13 +31,14 @@ class CompanyRepository:
         ORDER BY name
         """
 
-        cur = self.conn.cursor()
-        try:
-            cur.execute(sql)
-            columns = [col[0].lower() for col in cur.description]
-            return [dict(zip(columns, row)) for row in cur.fetchall()]
-        finally:
-            cur.close()
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            try:
+                cur.execute(sql)
+                columns = [col[0].lower() for col in cur.description]
+                return [dict(zip(columns, row)) for row in cur.fetchall()]
+            finally:
+                cur.close()
 
     def get_by_id(self, company_id: UUID) -> Dict | None:
         """
@@ -59,16 +58,17 @@ class CompanyRepository:
         WHERE id = %s AND is_deleted = FALSE
         """
 
-        cur = self.conn.cursor()
-        try:
-            cur.execute(sql, (str(company_id),))
-            row = cur.fetchone()
-            if not row:
-                return None
-            columns = [col[0].lower() for col in cur.description]
-            return dict(zip(columns, row))
-        finally:
-            cur.close()
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            try:
+                cur.execute(sql, (str(company_id),))
+                row = cur.fetchone()
+                if not row:
+                    return None
+                columns = [col[0].lower() for col in cur.description]
+                return dict(zip(columns, row))
+            finally:
+                cur.close()
 
     def get_by_ticker(self, ticker: str) -> Dict | None:
         """
@@ -88,16 +88,17 @@ class CompanyRepository:
         WHERE ticker = %s AND is_deleted = FALSE
         """
 
-        cur = self.conn.cursor()
-        try:
-            cur.execute(sql, (ticker,))
-            row = cur.fetchone()
-            if not row:
-                return None
-            columns = [col[0].lower() for col in cur.description]
-            return dict(zip(columns, row))
-        finally:
-            cur.close()
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            try:
+                cur.execute(sql, (ticker,))
+                row = cur.fetchone()
+                if not row:
+                    return None
+                columns = [col[0].lower() for col in cur.description]
+                return dict(zip(columns, row))
+            finally:
+                cur.close()
 
     def get_by_industry(self, industry_id: UUID) -> List[Dict]:
         """
@@ -118,38 +119,41 @@ class CompanyRepository:
         ORDER BY name
         """
 
-        cur = self.conn.cursor()
-        try:
-            cur.execute(sql, (str(industry_id),))
-            columns = [col[0].lower() for col in cur.description]
-            return [dict(zip(columns, row)) for row in cur.fetchall()]
-        finally:
-            cur.close()
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            try:
+                cur.execute(sql, (str(industry_id),))
+                columns = [col[0].lower() for col in cur.description]
+                return [dict(zip(columns, row)) for row in cur.fetchall()]
+            finally:
+                cur.close()
 
     def exists(self, company_id: UUID) -> bool:
         """
         Check if a company exists (regardless of deleted status).
         """
         sql = "SELECT 1 FROM companies WHERE id = %s"
-        cur = self.conn.cursor()
-        try:
-            cur.execute(sql, (str(company_id),))
-            return cur.fetchone() is not None
-        finally:
-            cur.close()
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            try:
+                cur.execute(sql, (str(company_id),))
+                return cur.fetchone() is not None
+            finally:
+                cur.close()
 
     def is_deleted(self, company_id: UUID) -> bool:
         """
         Check if a company is soft-deleted.
         """
         sql = "SELECT is_deleted FROM companies WHERE id = %s"
-        cur = self.conn.cursor()
-        try:
-            cur.execute(sql, (str(company_id),))
-            row = cur.fetchone()
-            return row is not None and row[0] is True
-        finally:
-            cur.close()
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            try:
+                cur.execute(sql, (str(company_id),))
+                row = cur.fetchone()
+                return row is not None and row[0] is True
+            finally:
+                cur.close()
 
     def check_duplicate(
         self,
@@ -173,12 +177,13 @@ class CompanyRepository:
             """
             params = (name, str(industry_id))
 
-        cur = self.conn.cursor()
-        try:
-            cur.execute(sql, params)
-            return cur.fetchone() is not None
-        finally:
-            cur.close()
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            try:
+                cur.execute(sql, params)
+                return cur.fetchone() is not None
+            finally:
+                cur.close()
 
     def create(
         self,
@@ -197,12 +202,13 @@ class CompanyRepository:
         VALUES (%s, %s, %s, %s, %s)
         """
 
-        cur = self.conn.cursor()
-        try:
-            cur.execute(sql, (company_id, name, ticker, str(industry_id), position_factor))
-            self.conn.commit()
-        finally:
-            cur.close()
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            try:
+                cur.execute(sql, (company_id, name, ticker, str(industry_id), position_factor))
+                conn.commit()
+            finally:
+                cur.close()
 
         return self.get_by_id(UUID(company_id))
 
@@ -241,12 +247,13 @@ class CompanyRepository:
 
         sql = f"UPDATE companies SET {', '.join(updates)} WHERE id = %s"
 
-        cur = self.conn.cursor()
-        try:
-            cur.execute(sql, tuple(params))
-            self.conn.commit()
-        finally:
-            cur.close()
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            try:
+                cur.execute(sql, tuple(params))
+                conn.commit()
+            finally:
+                cur.close()
 
         return self.get_by_id(company_id)
 
@@ -260,9 +267,10 @@ class CompanyRepository:
         WHERE id = %s
         """
 
-        cur = self.conn.cursor()
-        try:
-            cur.execute(sql, (str(company_id),))
-            self.conn.commit()
-        finally:
-            cur.close()
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            try:
+                cur.execute(sql, (str(company_id),))
+                conn.commit()
+            finally:
+                cur.close()

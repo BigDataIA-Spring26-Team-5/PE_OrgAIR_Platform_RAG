@@ -4,16 +4,14 @@ import logging
 from typing import List, Dict, Optional
 from uuid import uuid4
 from datetime import datetime, timezone
-from app.services.snowflake import get_snowflake_connection
+from app.repositories.base import BaseRepository
 
 logger = logging.getLogger(__name__)
 
 
-class SignalRepository:
+class SignalRepository(BaseRepository):
     """Repository for external signals in Snowflake."""
 
-    def __init__(self):
-        self.conn = get_snowflake_connection()
 
     
     # EXTERNAL SIGNALS CRUD
@@ -42,21 +40,22 @@ class SignalRepository:
         SELECT %s, %s, %s, %s, %s, %s, %s, %s, PARSE_JSON(%s), CURRENT_TIMESTAMP()
         """
         
-        cur = self.conn.cursor()
-        try:
-            cur.execute(sql, (
-                signal_id, company_id, category, source, signal_date,
-                raw_value, normalized_score, confidence, json.dumps(metadata)
-            ))
-            self.conn.commit()
-            logger.info(f"  💾 Signal saved: {category} | Score: {normalized_score}")
-            return {"id": signal_id, "normalized_score": normalized_score}
-        except Exception as e:
-            logger.error(f"Failed to save signal: {e}")
-            self.conn.rollback()
-            raise
-        finally:
-            cur.close()
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            try:
+                cur.execute(sql, (
+                    signal_id, company_id, category, source, signal_date,
+                    raw_value, normalized_score, confidence, json.dumps(metadata)
+                ))
+                conn.commit()
+                logger.info(f"  💾 Signal saved: {category} | Score: {normalized_score}")
+                return {"id": signal_id, "normalized_score": normalized_score}
+            except Exception as e:
+                logger.error(f"Failed to save signal: {e}")
+                conn.rollback()
+                raise
+            finally:
+                cur.close()
 
     def get_signals_by_company(self, company_id: str) -> List[Dict]:
         """Get all signals for a company."""
@@ -67,23 +66,24 @@ class SignalRepository:
         WHERE company_id = %s
         ORDER BY signal_date DESC
         """
-        cur = self.conn.cursor()
-        try:
-            cur.execute(sql, (company_id,))
-            columns = [col[0].lower() for col in cur.description]
-            results = []
-            for row in cur.fetchall():
-                record = dict(zip(columns, row))
-                # Parse metadata if it's a string
-                if record.get('metadata') and isinstance(record['metadata'], str):
-                    try:
-                        record['metadata'] = json.loads(record['metadata'])
-                    except:
-                        pass
-                results.append(record)
-            return results
-        finally:
-            cur.close()
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            try:
+                cur.execute(sql, (company_id,))
+                columns = [col[0].lower() for col in cur.description]
+                results = []
+                for row in cur.fetchall():
+                    record = dict(zip(columns, row))
+                    # Parse metadata if it's a string
+                    if record.get('metadata') and isinstance(record['metadata'], str):
+                        try:
+                            record['metadata'] = json.loads(record['metadata'])
+                        except:
+                            pass
+                    results.append(record)
+                return results
+            finally:
+                cur.close()
 
     def get_signals_by_ticker(self, ticker: str) -> List[Dict]:
         """Get all signals for a ticker."""
@@ -95,23 +95,24 @@ class SignalRepository:
         WHERE c.ticker = %s
         ORDER BY es.signal_date DESC
         """
-        cur = self.conn.cursor()
-        try:
-            cur.execute(sql, (ticker,))
-            columns = [col[0].lower() for col in cur.description]
-            results = []
-            for row in cur.fetchall():
-                record = dict(zip(columns, row))
-                # Parse metadata if it's a string
-                if record.get('metadata') and isinstance(record['metadata'], str):
-                    try:
-                        record['metadata'] = json.loads(record['metadata'])
-                    except:
-                        pass
-                results.append(record)
-            return results
-        finally:
-            cur.close()
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            try:
+                cur.execute(sql, (ticker,))
+                columns = [col[0].lower() for col in cur.description]
+                results = []
+                for row in cur.fetchall():
+                    record = dict(zip(columns, row))
+                    # Parse metadata if it's a string
+                    if record.get('metadata') and isinstance(record['metadata'], str):
+                        try:
+                            record['metadata'] = json.loads(record['metadata'])
+                        except:
+                            pass
+                    results.append(record)
+                return results
+            finally:
+                cur.close()
 
     def get_signals_by_category(self, company_id: str, category: str) -> List[Dict]:
         """Get signals by category for a company."""
@@ -122,45 +123,48 @@ class SignalRepository:
         WHERE company_id = %s AND category = %s
         ORDER BY signal_date DESC
         """
-        cur = self.conn.cursor()
-        try:
-            cur.execute(sql, (company_id, category))
-            columns = [col[0].lower() for col in cur.description]
-            results = []
-            for row in cur.fetchall():
-                record = dict(zip(columns, row))
-                # Parse metadata if it's a string
-                if record.get('metadata') and isinstance(record['metadata'], str):
-                    try:
-                        record['metadata'] = json.loads(record['metadata'])
-                    except:
-                        pass
-                results.append(record)
-            return results
-        finally:
-            cur.close()
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            try:
+                cur.execute(sql, (company_id, category))
+                columns = [col[0].lower() for col in cur.description]
+                results = []
+                for row in cur.fetchall():
+                    record = dict(zip(columns, row))
+                    # Parse metadata if it's a string
+                    if record.get('metadata') and isinstance(record['metadata'], str):
+                        try:
+                            record['metadata'] = json.loads(record['metadata'])
+                        except:
+                            pass
+                    results.append(record)
+                return results
+            finally:
+                cur.close()
 
     def delete_signals_by_category(self, company_id: str, category: str) -> int:
         """Delete all signals of a category for a company (for re-analysis)."""
         sql = "DELETE FROM external_signals WHERE company_id = %s AND category = %s"
-        cur = self.conn.cursor()
-        try:
-            cur.execute(sql, (company_id, category))
-            self.conn.commit()
-            return cur.rowcount
-        finally:
-            cur.close()
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            try:
+                cur.execute(sql, (company_id, category))
+                conn.commit()
+                return cur.rowcount
+            finally:
+                cur.close()
 
     def delete_signals_by_company(self, company_id: str) -> int:
         """Delete all signals for a company."""
         sql = "DELETE FROM external_signals WHERE company_id = %s"
-        cur = self.conn.cursor()
-        try:
-            cur.execute(sql, (company_id,))
-            self.conn.commit()
-            return cur.rowcount
-        finally:
-            cur.close()
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            try:
+                cur.execute(sql, (company_id,))
+                conn.commit()
+                return cur.rowcount
+            finally:
+                cur.close()
 
     
     # COMPANY SIGNAL SUMMARIES
@@ -175,16 +179,17 @@ class SignalRepository:
         FROM company_signal_summaries
         WHERE company_id = %s
         """
-        cur = self.conn.cursor()
-        try:
-            cur.execute(sql, (company_id,))
-            row = cur.fetchone()
-            if not row:
-                return None
-            columns = [col[0].lower() for col in cur.description]
-            return dict(zip(columns, row))
-        finally:
-            cur.close()
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            try:
+                cur.execute(sql, (company_id,))
+                row = cur.fetchone()
+                if not row:
+                    return None
+                columns = [col[0].lower() for col in cur.description]
+                return dict(zip(columns, row))
+            finally:
+                cur.close()
 
     def get_summary_by_ticker(self, ticker: str) -> Optional[Dict]:
         """Get signal summary by ticker."""
@@ -195,16 +200,17 @@ class SignalRepository:
         FROM company_signal_summaries
         WHERE ticker = %s
         """
-        cur = self.conn.cursor()
-        try:
-            cur.execute(sql, (ticker,))
-            row = cur.fetchone()
-            if not row:
-                return None
-            columns = [col[0].lower() for col in cur.description]
-            return dict(zip(columns, row))
-        finally:
-            cur.close()
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            try:
+                cur.execute(sql, (ticker,))
+                row = cur.fetchone()
+                if not row:
+                    return None
+                columns = [col[0].lower() for col in cur.description]
+                return dict(zip(columns, row))
+            finally:
+                cur.close()
 
     def get_all_summaries(self) -> List[Dict]:
         """Get all company signal summaries."""
@@ -215,13 +221,14 @@ class SignalRepository:
         FROM company_signal_summaries
         ORDER BY ticker
         """
-        cur = self.conn.cursor()
-        try:
-            cur.execute(sql)
-            columns = [col[0].lower() for col in cur.description]
-            return [dict(zip(columns, row)) for row in cur.fetchall()]
-        finally:
-            cur.close()
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            try:
+                cur.execute(sql)
+                columns = [col[0].lower() for col in cur.description]
+                return [dict(zip(columns, row)) for row in cur.fetchall()]
+            finally:
+                cur.close()
 
     def upsert_summary(
         self,
@@ -266,12 +273,13 @@ class SignalRepository:
                 
                 sql = f"UPDATE company_signal_summaries SET {', '.join(updates)} WHERE company_id = %s"
                 
-                cur = self.conn.cursor()
-                try:
-                    cur.execute(sql, tuple(params))
-                    self.conn.commit()
-                finally:
-                    cur.close()
+                with self.get_connection() as conn:
+                    cur = conn.cursor()
+                    try:
+                        cur.execute(sql, tuple(params))
+                        conn.commit()
+                    finally:
+                        cur.close()
         else:
             # Insert new record
             sql = """
@@ -281,15 +289,16 @@ class SignalRepository:
             ) VALUES (%s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP())
             """
             
-            cur = self.conn.cursor()
-            try:
-                cur.execute(sql, (
-                    company_id, ticker, leadership_score, hiring_score,
-                    innovation_score, digital_score, signal_count
-                ))
-                self.conn.commit()
-            finally:
-                cur.close()
+            with self.get_connection() as conn:
+                cur = conn.cursor()
+                try:
+                    cur.execute(sql, (
+                        company_id, ticker, leadership_score, hiring_score,
+                        innovation_score, digital_score, signal_count
+                    ))
+                    conn.commit()
+                finally:
+                    cur.close()
         
         # Recalculate composite if all scores present
         self._update_composite(company_id)
@@ -299,24 +308,26 @@ class SignalRepository:
     def _get_signal_count(self, company_id: str) -> int:
         """Get actual count of signals for a company."""
         sql = "SELECT COUNT(*) FROM external_signals WHERE company_id = %s"
-        cur = self.conn.cursor()
-        try:
-            cur.execute(sql, (company_id,))
-            row = cur.fetchone()
-            return row[0] if row else 0
-        finally:
-            cur.close()
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            try:
+                cur.execute(sql, (company_id,))
+                row = cur.fetchone()
+                return row[0] if row else 0
+            finally:
+                cur.close()
 
     def get_total_signal_count(self) -> int:
         """Get total count of all signals across all companies."""
         sql = "SELECT COUNT(*) FROM external_signals"
-        cur = self.conn.cursor()
-        try:
-            cur.execute(sql)
-            row = cur.fetchone()
-            return row[0] if row else 0
-        finally:
-            cur.close()
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            try:
+                cur.execute(sql)
+                row = cur.fetchone()
+                return row[0] if row else 0
+            finally:
+                cur.close()
 
     def _update_composite(self, company_id: str):
         """Recalculate composite score if all 4 signals exist."""
@@ -334,12 +345,13 @@ class SignalRepository:
         AND digital_presence_score IS NOT NULL
         AND leadership_signals_score IS NOT NULL
         """
-        cur = self.conn.cursor()
-        try:
-            cur.execute(sql, (company_id,))
-            self.conn.commit()
-        finally:
-            cur.close()
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            try:
+                cur.execute(sql, (company_id,))
+                conn.commit()
+            finally:
+                cur.close()
 
     def get_category_breakdown(self) -> List[Dict]:
         """Get signal count, avg score, and avg confidence per category."""
@@ -353,24 +365,26 @@ class SignalRepository:
         GROUP BY category
         ORDER BY category
         """
-        cur = self.conn.cursor()
-        try:
-            cur.execute(sql)
-            columns = [col[0].lower() for col in cur.description]
-            return [dict(zip(columns, row)) for row in cur.fetchall()]
-        finally:
-            cur.close()
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            try:
+                cur.execute(sql)
+                columns = [col[0].lower() for col in cur.description]
+                return [dict(zip(columns, row)) for row in cur.fetchall()]
+            finally:
+                cur.close()
 
     def delete_summary(self, company_id: str) -> bool:
         """Delete signal summary for a company."""
         sql = "DELETE FROM company_signal_summaries WHERE company_id = %s"
-        cur = self.conn.cursor()
-        try:
-            cur.execute(sql, (company_id,))
-            self.conn.commit()
-            return cur.rowcount > 0
-        finally:
-            cur.close()
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            try:
+                cur.execute(sql, (company_id,))
+                conn.commit()
+                return cur.rowcount > 0
+            finally:
+                cur.close()
 
 
 # Singleton

@@ -27,7 +27,7 @@ def load_env():
 def test_snowflake():
     print("\n🔹 Testing Snowflake connection...")
     try:
-        from app.services.snowflake import get_snowflake_connection
+        from app.repositories.base import get_snowflake_connection
         print("Loaded SECRET_KEY:", bool(os.getenv("SECRET_KEY")))
         conn = get_snowflake_connection()
         cur = conn.cursor()
