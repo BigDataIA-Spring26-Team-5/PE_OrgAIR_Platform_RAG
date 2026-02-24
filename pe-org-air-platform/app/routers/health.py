@@ -17,13 +17,9 @@ import os
 import time
 from pathlib import Path
 
-from dotenv import load_dotenv
-
-# Load .env only in local dev (Render will use Environment Variables)
+# env_path is used by health_env_check() below
 project_root = Path(__file__).resolve().parent.parent.parent
 env_path = project_root / ".env"
-if env_path.exists():
-    load_dotenv(dotenv_path=env_path)
 
 router = APIRouter(tags=["Health"])
 
@@ -72,45 +68,9 @@ class CacheKeysResponse(BaseModel):
 async def check_snowflake() -> str:
     """Check Snowflake connection health."""
     try:
-        import snowflake.connector
-
-        account = os.getenv("SNOWFLAKE_ACCOUNT")
-        user = os.getenv("SNOWFLAKE_USER")
-        password = os.getenv("SNOWFLAKE_PASSWORD")
-        warehouse = os.getenv("SNOWFLAKE_WAREHOUSE")
-        database = os.getenv("SNOWFLAKE_DATABASE")
-        schema = os.getenv("SNOWFLAKE_SCHEMA")
-        role = os.getenv("SNOWFLAKE_ROLE")
-
-        missing = [k for k, v in {
-            "SNOWFLAKE_ACCOUNT": account,
-            "SNOWFLAKE_USER": user,
-            "SNOWFLAKE_PASSWORD": password,
-        }.items() if not v]
-
-        if missing:
-            return f"unhealthy: Missing env vars: {', '.join(missing)}"
-
-        conn = snowflake.connector.connect(
-            account=account,
-            user=user,
-            password=password,
-            warehouse=warehouse,
-            database=database,
-            schema=schema,
-            role=role,
-        )
-
-        cursor = conn.cursor()
-        cursor.execute("SELECT CURRENT_USER(), CURRENT_ROLE()")
-        result = cursor.fetchone()
-        cursor.close()
-        conn.close()
-
-        return f"healthy (User: {result[0]}, Role: {result[1]})"
-
-    except ImportError:
-        return "unhealthy: snowflake-connector-python not installed"
+        from app.repositories.health_repository import get_health_repo
+        user, role = get_health_repo().ping()
+        return f"healthy (User: {user}, Role: {role})"
     except Exception as e:
         msg = str(e)
         msg = (msg[:160] + "...") if len(msg) > 160 else msg
@@ -387,33 +347,9 @@ async def health_env_check():
 @router.get("/health/table-counts", summary="Snowflake table row counts")
 async def table_counts() -> Dict[str, int]:
     """Return COUNT(*) for each of the 11 platform tables."""
-    tables = [
-        "INDUSTRIES", "COMPANIES", "ASSESSMENTS", "DIMENSION_SCORES",
-        "DOCUMENTS", "DOCUMENT_CHUNKS", "EXTERNAL_SIGNALS",
-        "COMPANY_SIGNAL_SUMMARIES", "SIGNAL_SCORES",
-        "SIGNAL_DIMENSION_MAPPING", "EVIDENCE_DIMENSION_SCORES",
-    ]
     try:
-        import snowflake.connector
-        conn = snowflake.connector.connect(
-            account=os.getenv("SNOWFLAKE_ACCOUNT"),
-            user=os.getenv("SNOWFLAKE_USER"),
-            password=os.getenv("SNOWFLAKE_PASSWORD"),
-            warehouse=os.getenv("SNOWFLAKE_WAREHOUSE"),
-            database=os.getenv("SNOWFLAKE_DATABASE"),
-            schema=os.getenv("SNOWFLAKE_SCHEMA"),
-            role=os.getenv("SNOWFLAKE_ROLE"),
-        )
-        cur = conn.cursor()
-        counts = {}
-        for t in tables:
-            try:
-                cur.execute(f"SELECT COUNT(*) FROM {t}")
-                counts[t] = cur.fetchone()[0]
-            except Exception:
-                counts[t] = 0
-        cur.close()
-        conn.close()
-        return counts
+        from app.repositories.health_repository import get_health_repo
+        return get_health_repo().get_table_counts()
     except Exception:
-        return {t: -1 for t in tables}
+        from app.repositories.health_repository import PLATFORM_TABLES
+        return {t: -1 for t in PLATFORM_TABLES}
