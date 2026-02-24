@@ -3,7 +3,7 @@ services:
   api:
     build:
       context: .
-      dockerfile: docker/Dockerfile
+      dockerfile: Dockerfile
     container_name: pe_orgair_platform_api
     ports:
       - "8000:8000"
@@ -12,6 +12,7 @@ services:
     environment:
       - REDIS_URL=redis://redis:6379/0  # Override to use Docker network
     volumes:
+      - ./app:/app/app
       - ./data:/app/data  # Mount local data folder to container
     depends_on:
       redis:
