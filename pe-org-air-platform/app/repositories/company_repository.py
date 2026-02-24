@@ -85,7 +85,7 @@ class CompanyRepository(BaseRepository):
             created_at,
             updated_at
         FROM companies
-        WHERE ticker = %s AND is_deleted = FALSE
+        WHERE UPPER(ticker) = UPPER(%s) AND is_deleted = FALSE
         """
 
         with self.get_connection() as conn:

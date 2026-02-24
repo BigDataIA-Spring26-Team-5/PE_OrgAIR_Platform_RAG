@@ -11,3 +11,14 @@ docker compose build --no-cache
 ```bash
 docker compose up
 ```
+## Error Codes
+
+**/HEALTH Error code design:**
+
+| Code | Dep | Rationale |
+|---|---|---|
+| `200` | all healthy | standard |
+| `207` | mixed | partial degradation  |
+| `502` | S3 | "bad gateway" — upstream storage unreachable |
+| `503` | Snowflake | "service unavailable" — primary DB down |
+| `504` | Redis | "gateway timeout" — cache layer timeout |

@@ -157,6 +157,24 @@ def row_to_response(row: dict, cache_info: Optional[CacheInfo] = None) -> Compan
 
 
 
+#  Identifier Resolver
+
+
+def resolve_company_identifier(
+    ticker: str, company_repo: CompanyRepository
+) -> dict:
+    """Accept either a UUID string or a ticker; return the company row or raise 404."""
+    import uuid as _uuid
+    try:
+        company_id = _uuid.UUID(ticker)
+        company = company_repo.get_by_id(company_id)
+    except ValueError:
+        company = company_repo.get_by_ticker(ticker)
+    if company is None:
+        raise_error(status.HTTP_404_NOT_FOUND, "COMPANY_NOT_FOUND", f"Company '{ticker}' not found")
+    return company
+
+
 #  Routes
 
 
@@ -270,26 +288,22 @@ async def list_companies(
 
 
 @router.get(
-    "/companies/{id}",
+    "/companies/{ticker}",
     response_model=CompanyResponse,
-    summary="Get company by ID",
-    description="Retrieves a company by UUID. Cached for 5 minutes.",
+    summary="Get company by ID or ticker",
+    description="Retrieves a company by UUID or ticker symbol (case-insensitive). Cached for 5 minutes.",
 )
 async def get_company(
-    id: UUID,
+    ticker: str,
     company_repo: CompanyRepository = Depends(get_company_repository),
 ) -> CompanyResponse:
-    # Check deleted/not-found before hitting cache (these checks are cheap)
-    if company_repo.is_deleted(id):
-        raise_company_deleted()
+    company = resolve_company_identifier(ticker, company_repo)
+    company_id = UUID(str(company["id"]))
 
-    cache_key = get_company_cache_key(id)
+    cache_key = get_company_cache_key(company_id)
 
     def _fetch():
-        company = company_repo.get_by_id(id)
-        if not company:
-            raise_company_not_found()
-        return row_to_response(company)
+        return row_to_response(company_repo.get_by_id(company_id))
 
     result, hit, latency = cached_query(cache_key, TTL_COMPANY, CompanyResponse, _fetch)
     result.cache = create_cache_info(hit, cache_key, latency, TTL_COMPANY)
@@ -297,23 +311,22 @@ async def get_company(
 
 
 @router.put(
-    "/companies/{id}",
+    "/companies/{ticker}",
     response_model=CompanyResponse,
     summary="Update company",
-    description="Updates company data and invalidates cache.",
+    description="Updates company data by UUID or ticker symbol (case-insensitive). Invalidates cache.",
 )
 async def update_company(
-    id: UUID,
+    ticker: str,
     company: CompanyUpdate,
     company_repo: CompanyRepository = Depends(get_company_repository),
     industry_repo: IndustryRepository = Depends(get_industry_repository),
 ) -> CompanyResponse:
-    if company_repo.is_deleted(id):
-        raise_company_deleted()
+    existing = resolve_company_identifier(ticker, company_repo)
+    id = UUID(str(existing["id"]))
 
-    existing = company_repo.get_by_id(id)
-    if not existing:
-        raise_company_not_found()
+    if existing.get("is_deleted"):
+        raise_company_deleted()
 
     update_data = company.model_dump(exclude_unset=True)
 
@@ -345,20 +358,20 @@ async def update_company(
 
 
 @router.delete(
-    "/companies/{id}",
+    "/companies/{ticker}",
     status_code=status.HTTP_204_NO_CONTENT,
     summary="Soft delete company",
-    description="Marks a company as deleted and invalidates cache.",
+    description="Marks a company as deleted by UUID or ticker symbol (case-insensitive). Invalidates cache.",
 )
 async def delete_company(
-    id: UUID,
+    ticker: str,
     company_repo: CompanyRepository = Depends(get_company_repository),
 ) -> None:
-    if company_repo.is_deleted(id):
-        raise_company_deleted()
+    existing = resolve_company_identifier(ticker, company_repo)
+    id = UUID(str(existing["id"]))
 
-    if not company_repo.exists(id):
-        raise_company_not_found()
+    if existing.get("is_deleted"):
+        raise_company_deleted()
 
     company_repo.soft_delete(id)
     invalidate_company_cache(id)
