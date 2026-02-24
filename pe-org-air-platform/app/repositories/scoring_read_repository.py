@@ -47,3 +47,8 @@ class ScoringReadRepository(BaseRepository):
 
 
 get_scoring_read_repo = make_singleton_factory(ScoringReadRepository)
+
+# Compatibility re-export — CompositeScoringRepository supersedes this class.
+from app.repositories.composite_scoring_repository import (  # noqa: F401
+    CompositeScoringRepository, get_composite_scoring_repo,
+)

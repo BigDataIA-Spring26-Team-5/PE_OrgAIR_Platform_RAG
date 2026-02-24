@@ -146,29 +146,12 @@ async def check_redis() -> str:
 async def check_s3() -> str:
     """Check AWS S3 connection health."""
     try:
-        import boto3
         from botocore.exceptions import ClientError, NoCredentialsError
+        from app.services.s3_storage import get_s3_service
 
-        bucket = os.getenv("S3_BUCKET", "pe-orgair-platform")
-        region = os.getenv("AWS_REGION")
-
-        if not region:
-            return "unhealthy: Missing AWS_REGION"
-
-        access_key = os.getenv("AWS_ACCESS_KEY_ID")
-        secret_key = os.getenv("AWS_SECRET_ACCESS_KEY")
-        if not access_key or not secret_key:
-            return "unhealthy: Missing AWS credentials"
-
-        s3_client = boto3.client(
-            "s3",
-            aws_access_key_id=access_key,
-            aws_secret_access_key=secret_key,
-            region_name=region,
-        )
-
-        s3_client.head_bucket(Bucket=bucket)
-        return f"healthy (Bucket: {bucket}, Region: {region})"
+        svc = get_s3_service()
+        svc.s3_client.head_bucket(Bucket=svc.bucket_name)
+        return f"healthy (Bucket: {svc.bucket_name})"
 
     except NoCredentialsError:
         return "unhealthy: AWS credentials not configured"

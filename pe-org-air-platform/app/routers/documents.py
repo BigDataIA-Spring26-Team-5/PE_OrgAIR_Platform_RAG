@@ -557,28 +557,12 @@ async def reset_company_data(ticker: str):
     for folder in ["raw", "parsed", "chunks"]:
         prefix = f"sec/{folder}/{ticker}/"
         logger.info(f"  🪣 Deleting S3 folder: {prefix}")
-        
-        try:
-            # List all objects with this prefix
-            response = s3_service.s3_client.list_objects_v2(
-                Bucket=s3_service.bucket_name,
-                Prefix=prefix
-            )
-            
-            objects = response.get('Contents', [])
-            if objects:
-                # Delete all objects
-                delete_keys = [{'Key': obj['Key']} for obj in objects]
-                s3_service.s3_client.delete_objects(
-                    Bucket=s3_service.bucket_name,
-                    Delete={'Objects': delete_keys}
-                )
-                results["s3_deleted"][folder] = len(delete_keys)
-                logger.info(f"  ✅ Deleted {len(delete_keys)} files from {folder}/")
-            else:
-                logger.info(f"  ℹ️ No files found in {folder}/")
-        except Exception as e:
-            logger.error(f"  ❌ Error deleting {folder}/: {e}")
+        deleted = s3_service.delete_prefix(prefix)
+        results["s3_deleted"][folder] = deleted
+        if deleted:
+            logger.info(f"  ✅ Deleted {deleted} files from {folder}/")
+        else:
+            logger.info(f"  ℹ️ No files found in {folder}/")
     
     logger.info(f"🗑️ RESET COMPLETE FOR: {ticker}")
     return results
@@ -598,22 +582,7 @@ async def reset_raw_only(ticker: str):
     prefix = f"sec/raw/{ticker}/"
     
     try:
-        response = s3_service.s3_client.list_objects_v2(
-            Bucket=s3_service.bucket_name,
-            Prefix=prefix
-        )
-        
-        objects = response.get('Contents', [])
-        deleted = 0
-        
-        if objects:
-            delete_keys = [{'Key': obj['Key']} for obj in objects]
-            s3_service.s3_client.delete_objects(
-                Bucket=s3_service.bucket_name,
-                Delete={'Objects': delete_keys}
-            )
-            deleted = len(delete_keys)
-        
+        deleted = s3_service.delete_prefix(prefix)
         return {"ticker": ticker, "folder": "raw", "files_deleted": deleted}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -635,25 +604,11 @@ async def reset_parsed_only(ticker: str):
     # Delete from S3
     prefix = f"sec/parsed/{ticker}/"
     try:
-        response = s3_service.s3_client.list_objects_v2(
-            Bucket=s3_service.bucket_name,
-            Prefix=prefix
-        )
-        
-        objects = response.get('Contents', [])
-        deleted = 0
-        
-        if objects:
-            delete_keys = [{'Key': obj['Key']} for obj in objects]
-            s3_service.s3_client.delete_objects(
-                Bucket=s3_service.bucket_name,
-                Delete={'Objects': delete_keys}
-            )
-            deleted = len(delete_keys)
-        
+        deleted = s3_service.delete_prefix(prefix)
+
         # Reset status in Snowflake
         doc_repo.reset_status_by_ticker(ticker, from_status='parsed', to_status='uploaded')
-        
+
         return {"ticker": ticker, "folder": "parsed", "files_deleted": deleted, "status_reset": "uploaded"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -679,21 +634,7 @@ async def reset_chunks_only(ticker: str):
     # Delete from S3
     prefix = f"sec/chunks/{ticker}/"
     try:
-        response = s3_service.s3_client.list_objects_v2(
-            Bucket=s3_service.bucket_name,
-            Prefix=prefix
-        )
-        
-        objects = response.get('Contents', [])
-        s3_deleted = 0
-        
-        if objects:
-            delete_keys = [{'Key': obj['Key']} for obj in objects]
-            s3_service.s3_client.delete_objects(
-                Bucket=s3_service.bucket_name,
-                Delete={'Objects': delete_keys}
-            )
-            s3_deleted = len(delete_keys)
+        s3_deleted = s3_service.delete_prefix(prefix)
         
         # Reset status and chunk_count in Snowflake
         doc_repo.reset_status_by_ticker(ticker, from_status='chunked', to_status='parsed')

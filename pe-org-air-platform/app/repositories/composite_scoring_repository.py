@@ -15,7 +15,7 @@ fetch_orgair_row) migrated from scoring_read_repository.py are preserved unchang
 The eight write helpers (upsert_*) are migrated verbatim from the router files —
 no SQL semantics were altered.
 """
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
 
 from app.repositories.base import BaseRepository
 from app.services.utils import make_singleton_factory
@@ -30,26 +30,13 @@ class CompositeScoringRepository(BaseRepository):
 
     def _query(self, ticker: str, columns: List[str]) -> Optional[Dict]:
         """Execute SELECT <columns> FROM SCORING WHERE ticker = %s."""
-        from snowflake.connector import DictCursor
-
         cols = ", ".join(columns)
-        with self.get_connection() as conn:
-            cursor = conn.cursor(DictCursor)
-            cursor.execute(
-                f"SELECT {cols} FROM SCORING WHERE ticker = %s",
-                [ticker.upper()],
-            )
-            row = cursor.fetchone()
-            cursor.close()
-            return row or None
+        sql = f"SELECT {cols} FROM SCORING WHERE ticker = %s"
+        return self.execute_query(sql, [ticker.upper()], fetch_one=True)
 
     def _execute(self, sql: str, params: list) -> None:
         """Execute a DML statement (MERGE/INSERT/UPDATE) and commit."""
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(sql, params)
-            conn.commit()
-            cursor.close()
+        self.execute_query(sql, params, commit=True)
 
     # =====================================================================
     # READ — fetch rows from SCORING

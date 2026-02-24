@@ -30,6 +30,13 @@ def client():
         yield test_client
 
 
+@pytest.fixture(scope="module")
+def api_client():
+    """Alias for client — used by test_phases_1_2_3_verification.py."""
+    with TestClient(app) as test_client:
+        yield test_client
+
+
 # =============================================================================
 # SAMPLE UUID FIXTURES - MATCHING SEED DATA
 # =============================================================================

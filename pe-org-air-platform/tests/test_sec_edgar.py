@@ -728,25 +728,21 @@ class TestResetEndpoints:
         mock_chunk_repo.delete_by_ticker.return_value = 500
         mock_chunk_repository.return_value = mock_chunk_repo
         
-        # Mock S3
+        # Mock S3 — reset endpoints now call delete_prefix() via S3StorageService
         mock_s3 = Mock()
-        mock_s3.s3_client.list_objects_v2.return_value = {"Contents": [{"Key": "test"}]}
-        mock_s3.s3_client.delete_objects.return_value = {}
-        mock_s3.bucket_name = "test-bucket"
+        mock_s3.delete_prefix.return_value = 1
         mock_s3_service.return_value = mock_s3
-        
+
         response = client.delete("/api/v1/documents/reset/CAT")
-        
+
         assert response.status_code == 200
         data = response.json()
         assert data["ticker"] == "CAT"
-    
+
     def test_reset_raw_only(self, client, mock_s3_service):
         """Test deleting only raw files"""
         mock_s3 = Mock()
-        mock_s3.s3_client.list_objects_v2.return_value = {"Contents": [{"Key": "test"}]}
-        mock_s3.s3_client.delete_objects.return_value = {}
-        mock_s3.bucket_name = "test-bucket"
+        mock_s3.delete_prefix.return_value = 1
         mock_s3_service.return_value = mock_s3
         
         response = client.delete("/api/v1/documents/reset/CAT/raw")

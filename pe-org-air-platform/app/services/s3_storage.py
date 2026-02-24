@@ -122,16 +122,34 @@ class S3StorageService:
                 objects = page.get("Contents", [])
                 if not objects:
                     continue
-                delete_keys = [{"Key": obj["Key"]} for obj in objects]
-                self.s3_client.delete_objects(
-                    Bucket=self.bucket_name,
-                    Delete={"Objects": delete_keys},
-                )
-                deleted_count += len(delete_keys)
-                logger.info(f"Deleted {len(delete_keys)} S3 objects under prefix '{prefix}'")
+                all_keys = [{"Key": obj["Key"]} for obj in objects]
+                # S3 delete_objects is limited to 1000 keys per request
+                for i in range(0, len(all_keys), 1000):
+                    batch = all_keys[i:i + 1000]
+                    self.s3_client.delete_objects(
+                        Bucket=self.bucket_name,
+                        Delete={"Objects": batch},
+                    )
+                    deleted_count += len(batch)
+                logger.info(f"Deleted {len(all_keys)} S3 objects under prefix '{prefix}'")
         except Exception as e:
             logger.error(f"Error deleting S3 prefix '{prefix}': {e}")
         return deleted_count
+
+    def delete_keys(self, keys: list) -> int:
+        """Delete a specific list of S3 keys in one batched call. Returns count deleted."""
+        if not keys:
+            return 0
+        try:
+            objects = [{"Key": k} for k in keys]
+            resp = self.s3_client.delete_objects(
+                Bucket=self.bucket_name,
+                Delete={"Objects": objects, "Quiet": True},
+            )
+            return len(keys) - len(resp.get("Errors", []))
+        except Exception as e:
+            logger.error(f"Error deleting {len(keys)} S3 keys: {e}")
+            return 0
 
     def list_files(self, prefix: str) -> list:
         """List files in S3 with given prefix"""
