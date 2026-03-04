@@ -1,190 +1,136 @@
-"""
-cs2_client.py — CS4 RAG Search
-src/services/integration/cs2_client.py
-
-HTTP client for the CS2 evidence layer (pe-org-air-platform /evidence/* endpoints).
-Data models derived from:
-  - app/models/signal.py   (SignalCategory, SignalSource)
-  - app/models/evidence.py (SignalEvidence fields)
-"""
-
-from __future__ import annotations
-
-import os
+"""CS2 Evidence Collection API client."""
 from dataclasses import dataclass, field
+from typing import List, Optional, Dict, Any
 from datetime import datetime
 from enum import Enum
-from typing import Any, Dict, List, Optional
-
 import httpx
-import structlog
-
-logger = structlog.get_logger(__name__)
-
-
-# ---------------------------------------------------------------------------
-# Enums
-# ---------------------------------------------------------------------------
-
-class SignalCategory(str, Enum):
-    """
-    CS2 signal categories.
-    Renamed per CS4 spec:
-      CULTURE_SIGNALS   (platform: GLASSDOOR_CULTURE)
-      GOVERNANCE_SIGNALS (platform: BOARD_GOVERNANCE)
-    """
-    TECHNOLOGY_HIRING  = "technology_hiring"
-    INNOVATION_ACTIVITY = "innovation_activity"
-    DIGITAL_PRESENCE   = "digital_presence"
-    LEADERSHIP_SIGNALS = "leadership_signals"
-    CULTURE_SIGNALS    = "culture_signals"     # was GLASSDOOR_CULTURE
-    GOVERNANCE_SIGNALS = "governance_signals"  # was BOARD_GOVERNANCE
-
 
 class SourceType(str, Enum):
-    """
-    All evidence sources.
-    Derived from platform's SignalSource enum with CS4 naming convention.
-    Added: ANALYST_INTERVIEW, DD_DATA_ROOM (CS4 new).
-    """
-    # Job sources
-    JOB_POSTING_LINKEDIN  = "linkedin"
-    JOB_POSTING_INDEED    = "indeed"
-    # Culture / review source
-    GLASSDOOR_REVIEW      = "glassdoor"
-    # Patent source
-    USPTO_PATENT          = "uspto"
-    # Tech stack sources
-    TECH_STACK_BUILTWITH  = "builtwith"
-    TECH_STACK_WAPPALYZER = "wappalyzer"
-    TECH_STACK_COMBINED   = "builtwith_wappalyzer"
-    # SEC / public sources
-    SEC_10K_ITEM_1        = "sec_item_1"
-    SEC_10K_ITEM_1A       = "sec_item_1a"
-    SEC_10K_ITEM_7        = "sec_item_7"
-    SEC_FILING            = "sec_filing"
-    PRESS_RELEASE         = "press_release"
-    COMPANY_WEBSITE       = "company_website"
-    # Governance
-    BOARD_PROXY           = "board_proxy"
-    # CS4 new sources
-    ANALYST_INTERVIEW     = "analyst_interview"
-    DD_DATA_ROOM          = "dd_data_room"
+    """Evidence source types from CS2."""
+    SEC_10K_ITEM_1 = "sec_10k_item_1"      # Business description
+    SEC_10K_ITEM_1A = "sec_10k_item_1a"    # Risk factors
+    SEC_10K_ITEM_7 = "sec_10k_item_7"      # MD&A
+    JOB_POSTING_LINKEDIN = "job_posting_linkedin"
+    JOB_POSTING_INDEED = "job_posting_indeed"
+    PATENT_USPTO = "patent_uspto"
+    PRESS_RELEASE = "press_release"
+    GLASSDOOR_REVIEW = "glassdoor_review"   # From CS3 Task 5.0c
+    BOARD_PROXY_DEF14A = "board_proxy_def14a"  # From CS3 Task 5.0d
+    ANALYST_INTERVIEW = "analyst_interview"  # NEW: DD interviews
+    DD_DATA_ROOM = "dd_data_room"           # NEW: Data room docs
 
-
-# ---------------------------------------------------------------------------
-# Data models
-# ---------------------------------------------------------------------------
+class SignalCategory(str, Enum):
+    """Signal categories from CS2 collectors."""
+    TECHNOLOGY_HIRING = "technology_hiring"
+    INNOVATION_ACTIVITY = "innovation_activity"
+    DIGITAL_PRESENCE = "digital_presence"
+    LEADERSHIP_SIGNALS = "leadership_signals"
+    CULTURE_SIGNALS = "culture_signals"
+    GOVERNANCE_SIGNALS = "governance_signals"
 
 @dataclass
 class ExtractedEntity:
-    """A named entity or key phrase extracted from evidence text."""
+    """Entity extracted from evidence text."""
+    entity_type: str  # "ai_investment", "technology", "person", etc.
     text: str
-    entity_type: str        # e.g. "PERSON", "ORG", "TECH", "SKILL"
-    confidence: float = 1.0
-    metadata: Dict[str, Any] = field(default_factory=dict)
-
+    char_start: int
+    char_end: int
+    confidence: float
+    attributes: Dict[str, Any] = field(default_factory=dict)
 
 @dataclass
 class CS2Evidence:
-    """
-    A single evidence item from CS2.
-    Fields mirror SignalEvidence (app/models/evidence.py) with CS4 additions:
-      indexed_in_cs4, indexed_at, extracted_entities.
-    """
-    id: str
-    category: str
-    source: str
-    signal_date: Optional[datetime] = None
-    raw_value: Optional[str] = None
-    normalized_score: Optional[float] = None
-    confidence: Optional[float] = None
-    metadata: Optional[Dict[str, Any]] = None
-    created_at: Optional[datetime] = None
-    # CS4 additions
-    indexed_in_cs4: bool = False
-    indexed_at: Optional[datetime] = None
+    """Evidence item from CS2 Evidence Collection."""
+    evidence_id: str
+    company_id: str
+    source_type: SourceType
+    signal_category: SignalCategory
+    content: str
+    extracted_at: datetime
+    confidence: float
+
+    # Optional metadata
+    fiscal_year: Optional[int] = None
+    source_url: Optional[str] = None
+    page_number: Optional[int] = None
     extracted_entities: List[ExtractedEntity] = field(default_factory=list)
 
-    @classmethod
-    def from_api_dict(cls, data: Dict[str, Any]) -> "CS2Evidence":
-        """Construct from raw API response dict."""
-        return cls(
-            id=data["id"],
-            category=data.get("category", ""),
-            source=data.get("source", ""),
-            signal_date=_parse_dt(data.get("signal_date")),
-            raw_value=data.get("raw_value"),
-            normalized_score=data.get("normalized_score"),
-            confidence=data.get("confidence"),
-            metadata=data.get("metadata"),
-            created_at=_parse_dt(data.get("created_at")),
-        )
-
-
-def _parse_dt(value: Optional[str]) -> Optional[datetime]:
-    if value is None:
-        return None
-    try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except (ValueError, AttributeError):
-        return None
-
-
-# ---------------------------------------------------------------------------
-# CS2Client
-# ---------------------------------------------------------------------------
+    # Indexing status
+    indexed_in_cs4: bool = False
+    indexed_at: Optional[datetime] = None
 
 class CS2Client:
-    """
-    Async HTTP client for the CS2 evidence endpoints.
-    Base URL defaults to CS2_BASE_URL env var (fallback: http://localhost:8000).
-    """
+    """Client for CS2 Evidence Collection API."""
 
-    def __init__(
-        self,
-        base_url: Optional[str] = None,
-        timeout: float = 30.0,
-    ) -> None:
-        self._base_url = (base_url or os.getenv("CS2_BASE_URL", "http://localhost:8000")).rstrip("/")
-        self._client = httpx.AsyncClient(base_url=self._base_url, timeout=timeout)
-        self._log = logger.bind(client="cs2")
+    def __init__(self, base_url: str = "http://localhost:8001"):
+        self.base_url = base_url
+        self.client = httpx.AsyncClient(timeout=60.0)
 
     async def get_evidence(
         self,
-        ticker: str,
-        category: Optional[SignalCategory] = None,
+        company_id: str,
+        source_types: Optional[List[SourceType]] = None,
+        signal_categories: Optional[List[SignalCategory]] = None,
+        min_confidence: float = 0.0,
+        indexed: Optional[bool] = None,
+        since: Optional[datetime] = None,
     ) -> List[CS2Evidence]:
         """
-        Fetch evidence items for a company ticker.
-        Maps to GET /companies/{ticker}/evidence on the platform.
-        """
-        url = f"/companies/{ticker}/evidence"
-        params: Dict[str, str] = {}
-        if category is not None:
-            params["category"] = category.value
+        Fetch evidence for a company with filters.
 
-        self._log.info("fetching evidence", ticker=ticker, category=category)
-        response = await self._client.get(url, params=params)
+        Args:
+            company_id: Company ticker or ID
+            source_types: Filter by source types
+            signal_categories: Filter by signal categories
+            min_confidence: Minimum confidence threshold
+            indexed: Filter by indexing status (None=all)
+            since: Only evidence extracted after this date
+        """
+        params = {"company_id": company_id}
+        if source_types:
+            params["source_types"] = ",".join(s.value for s in source_types)
+        if signal_categories:
+            params["signal_categories"] = ",".join(s.value for s in signal_categories)
+        if min_confidence > 0:
+            params["min_confidence"] = min_confidence
+        if indexed is not None:
+            params["indexed"] = indexed
+        if since:
+            params["since"] = since.isoformat()
+
+        response = await self.client.get(
+            f"{self.base_url}/api/v1/evidence",
+            params=params
+        )
         response.raise_for_status()
 
-        data = response.json()
-        signals: List[Dict[str, Any]] = data.get("signals", [])
-        return [CS2Evidence.from_api_dict(s) for s in signals]
+        evidence_list = []
+        for e in response.json():
+            entities = [ExtractedEntity(**ent) for ent in e.get("extracted_entities", [])]
+            evidence_list.append(CS2Evidence(
+                evidence_id=e["evidence_id"],
+                company_id=e["company_id"],
+                source_type=SourceType(e["source_type"]),
+                signal_category=SignalCategory(e["signal_category"]),
+                content=e["content"],
+                extracted_at=datetime.fromisoformat(e["extracted_at"]),
+                confidence=e["confidence"],
+                fiscal_year=e.get("fiscal_year"),
+                source_url=e.get("source_url"),
+                page_number=e.get("page_number"),
+                extracted_entities=entities,
+                indexed_in_cs4=e.get("indexed_in_cs4", False),
+            ))
+        return evidence_list
 
-    async def mark_indexed(self, evidence_id: str, indexed_at: Optional[datetime] = None) -> None:
-        """
-        Mark an evidence item as indexed in CS4 (local state only — no platform endpoint).
-        In production this would update a local index-tracking store.
-        """
-        ts = indexed_at or datetime.utcnow()
-        self._log.info("marking evidence indexed", evidence_id=evidence_id, indexed_at=ts.isoformat())
+    async def mark_indexed(self, evidence_ids: List[str]) -> int:
+        """Mark evidence as indexed in CS4."""
+        response = await self.client.post(
+            f"{self.base_url}/api/v1/evidence/mark-indexed",
+            json={"evidence_ids": evidence_ids}
+        )
+        response.raise_for_status()
+        return response.json()["updated_count"]
 
-    async def close(self) -> None:
-        await self._client.aclose()
-
-    async def __aenter__(self) -> "CS2Client":
-        return self
-
-    async def __aexit__(self, *_: Any) -> None:
-        await self.close()
+    async def close(self):
+        await self.client.aclose()

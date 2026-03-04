@@ -1,129 +1,62 @@
-"""
-evidence_indexing_dag.py — CS4 RAG Search
-dags/evidence_indexing_dag.py
-
-Airflow DAG for nightly evidence indexing into ChromaDB.
-Pulls CS2 evidence from the platform and indexes it for RAG retrieval.
-
-Usage:
-  Place this file in your Airflow dags/ folder (or mount via docker-compose).
-  Requires: apache-airflow>=2.9, httpx, chromadb, sentence-transformers
-"""
-
-from __future__ import annotations
-
-import asyncio
-import os
+"""Automated evidence indexing pipeline."""
 from datetime import datetime, timedelta
+from airflow import DAG
+from airflow.operators.python import PythonOperator
+import structlog
 
-# Guard: only import Airflow if available (avoids import errors in plain Python)
-try:
-    from airflow import DAG
-    from airflow.operators.python import PythonOperator
-    _AIRFLOW_AVAILABLE = True
-except ImportError:
-    _AIRFLOW_AVAILABLE = False
+logger = structlog.get_logger()
 
-PLATFORM_URL = os.getenv("PLATFORM_URL", "http://localhost:8000")
-CHROMA_HOST = os.getenv("CHROMA_HOST", "localhost")
-CHROMA_PORT = int(os.getenv("CHROMA_PORT", "8001"))
-TARGET_TICKERS = os.getenv("TARGET_TICKERS", "NVDA,JPM,WMT,GE,DG").split(",")
+default_args = {
+    "owner": "pe-analytics",
+    "retries": 3,
+    "retry_delay": timedelta(minutes=5),
+    "retry_exponential_backoff": True,
+}
 
+dag = DAG(
+    dag_id="pe_evidence_indexing",
+    default_args=default_args,
+    schedule_interval="0 2 * * *",  # 2 AM daily
+    start_date=datetime(2026, 2, 20),
+    catchup=False,
+)
 
-# ---------------------------------------------------------------------------
-# Task callables
-# ---------------------------------------------------------------------------
-
-def fetch_and_index_evidence(ticker: str, **context: object) -> int:
-    """
-    Fetch CS2 evidence for ticker and upsert into ChromaDB.
-    Returns number of documents indexed.
-    """
+def fetch_new_evidence(**context):
+    """Fetch unindexed evidence from CS2."""
     import httpx
-    import chromadb
-    from sentence_transformers import SentenceTransformer
+    response = httpx.get("http://cs2-api:8001/api/v1/evidence", params={"indexed": False})
+    evidence = response.json()
+    context["ti"].xcom_push(key="evidence", value=evidence)
+    return len(evidence)
 
-    print(f"[{ticker}] fetching evidence from {PLATFORM_URL}")
+def index_evidence(**context):
+    """Index evidence in vector store."""
+    from services.retrieval.hybrid import HybridRetriever
+    from services.retrieval.dimension_mapper import DimensionMapper
 
-    # Fetch evidence
-    with httpx.Client(base_url=PLATFORM_URL, timeout=60) as client:
-        resp = client.get(f"/companies/{ticker}/evidence")
-        resp.raise_for_status()
-        signals = resp.json().get("signals", [])
-
-    if not signals:
-        print(f"[{ticker}] no signals found — skipping")
+    evidence = context["ti"].xcom_pull(key="evidence", task_ids="fetch_evidence")
+    if not evidence:
         return 0
 
-    # Prepare documents
-    texts = [s.get("raw_value") or s.get("id", "") for s in signals]
-    ids = [s["id"] for s in signals]
-    metadatas = [
-        {
-            "ticker": ticker,
-            "category": s.get("category", ""),
-            "source": s.get("source", ""),
-            "normalized_score": str(s.get("normalized_score", "")),
-        }
-        for s in signals
-    ]
+    mapper = DimensionMapper()
+    retriever = HybridRetriever()
 
-    # Embed and upsert
-    encoder = SentenceTransformer("all-MiniLM-L6-v2")
-    embeddings = encoder.encode(texts, show_progress_bar=False).tolist()
+    docs = []
+    for e in evidence:
+        primary_dim = mapper.get_primary_dimension(e["signal_category"])
+        docs.append({
+            "doc_id": e["evidence_id"],
+            "content": e["content"],
+            "metadata": {
+                "company_id": e["company_id"],
+                "source_type": e["source_type"],
+                "dimension": primary_dim,
+                "confidence": e["confidence"],
+            }
+        })
 
-    chroma = chromadb.HttpClient(host=CHROMA_HOST, port=CHROMA_PORT)
-    collection = chroma.get_or_create_collection("cs4_evidence")
-    collection.upsert(documents=texts, ids=ids, embeddings=embeddings, metadatas=metadatas)
+    return retriever.index_documents(docs)
 
-    print(f"[{ticker}] indexed {len(ids)} documents")
-    return len(ids)
-
-
-def verify_index(**context: object) -> None:
-    """Verify the ChromaDB collection count after indexing."""
-    import chromadb
-    chroma = chromadb.HttpClient(host=CHROMA_HOST, port=CHROMA_PORT)
-    collection = chroma.get_or_create_collection("cs4_evidence")
-    count = collection.count()
-    print(f"ChromaDB cs4_evidence collection: {count} documents")
-
-
-# ---------------------------------------------------------------------------
-# DAG definition (only if Airflow is available)
-# ---------------------------------------------------------------------------
-
-if _AIRFLOW_AVAILABLE:
-    default_args = {
-        "owner": "cs4",
-        "retries": 2,
-        "retry_delay": timedelta(minutes=5),
-        "email_on_failure": False,
-    }
-
-    with DAG(
-        dag_id="evidence_indexing",
-        description="Nightly CS2 evidence indexing into ChromaDB for RAG",
-        schedule_interval="0 2 * * *",  # 2 AM daily
-        start_date=datetime(2026, 1, 1),
-        catchup=False,
-        default_args=default_args,
-        tags=["cs4", "rag", "evidence"],
-    ) as dag:
-
-        index_tasks = [
-            PythonOperator(
-                task_id=f"index_{ticker.lower()}",
-                python_callable=fetch_and_index_evidence,
-                op_kwargs={"ticker": ticker},
-            )
-            for ticker in TARGET_TICKERS
-        ]
-
-        verify_task = PythonOperator(
-            task_id="verify_index",
-            python_callable=verify_index,
-        )
-
-        # All index tasks run in parallel, then verify
-        index_tasks >> verify_task  # type: ignore[operator]
+t1 = PythonOperator(task_id="fetch_evidence", python_callable=fetch_new_evidence, dag=dag)
+t2 = PythonOperator(task_id="index_evidence", python_callable=index_evidence, dag=dag)
+t1 >> t2

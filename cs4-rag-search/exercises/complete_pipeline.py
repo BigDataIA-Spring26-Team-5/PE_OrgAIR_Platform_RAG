@@ -1,147 +1,104 @@
 """
-complete_pipeline.py — CS4 RAG Search
-exercises/complete_pipeline.py
+Complete Pipeline Exercise: Why did NVIDIA score 78 on Data Infrastructure?
 
-End-to-end exercise scaffold: runs a full IC prep workflow for a single ticker.
-Run with: python exercises/complete_pipeline.py
-
-Prerequisites:
-  1. pip install -r requirements.txt
-  2. ChromaDB running: docker compose up chromadb
-  3. pe-org-air-platform running on http://localhost:8000
-  4. OPENAI_API_KEY (or ANTHROPIC_API_KEY) set in environment
+Prerequisites: CS1, CS2, CS3 APIs running with NVDA data
 """
-
-from __future__ import annotations
-
 import asyncio
-import json
-import os
-import sys
+from services.integration.cs1_client import CS1Client
+from services.integration.cs2_client import CS2Client
+from services.integration.cs3_client import CS3Client, Dimension
+from services.retrieval.hybrid import HybridRetriever
+from services.retrieval.dimension_mapper import DimensionMapper
+from services.justification.generator import JustificationGenerator
+from services.workflows.ic_prep import ICPrepWorkflow
 
-# Allow running from project root without installing the package
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+async def exercise_nvda_justification():
+    """Generate score justification for NVIDIA Data Infrastructure."""
+    print("="*60)
+    print("EXERCISE: NVIDIA Data Infrastructure Score Justification")
+    print("="*60)
 
-from dotenv import load_dotenv
+    # Step 1: Verify company in CS1
+    cs1 = CS1Client()
+    company = await cs1.get_company("NVDA")
+    print(f"\n[CS1] Company: {company.name}")
+    print(f"      Sector: {company.sector.value}")
+    print(f"      Market Cap Percentile: {company.market_cap_percentile:.2f}")
 
-load_dotenv()
+    # Step 2: Fetch CS3 score
+    cs3 = CS3Client()
+    score = await cs3.get_dimension_score("NVDA", Dimension.DATA_INFRASTRUCTURE)
+    print(f"\n[CS3] Data Infrastructure Score: {score.score:.1f}")
+    print(f"      Level: {score.level.value} ({score.level.name_label})")
+    print(f"      95% CI: [{score.confidence_interval[0]:.1f}, {score.confidence_interval[1]:.1f}]")
 
-from src.services.integration.cs1_client import CS1Client
-from src.services.integration.cs2_client import CS2Client
-from src.services.integration.cs3_client import CS3Client
-from src.services.retrieval.hybrid import HybridRetriever
-from src.services.retrieval.dimension_mapper import DimensionMapper, SignalCategory
-from src.services.justification.generator import JustificationGenerator
-from src.services.workflows.ic_prep import ICPrepWorkflow
-from src.services.collection.analyst_notes import AnalystNoteIngester, AnalystNote
+    # Step 3: Get rubric for Level 4
+    rubrics = await cs3.get_rubric(Dimension.DATA_INFRASTRUCTURE, score.level)
+    rubric = rubrics[0]
+    print(f"\n[CS3] Level {score.level.value} Rubric:")
+    print(f"      {rubric.criteria_text[:100]}...")
+    print(f"      Keywords: {rubric.keywords[:5]}")
 
+    # Step 4: Fetch and index CS2 evidence
+    cs2 = CS2Client()
+    evidence = await cs2.get_evidence("NVDA")
+    print(f"\n[CS2] Total evidence items: {len(evidence)}")
 
-# ---------------------------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------------------------
+    mapper = DimensionMapper()
+    retriever = HybridRetriever()
 
-TICKER = os.getenv("TARGET_TICKER", "NVDA")
-ASSESSMENT_ID = os.getenv("ASSESSMENT_ID", None)  # optional
-PLATFORM_URL = os.getenv("PLATFORM_URL", "http://localhost:8000")
-CHROMA_HOST = os.getenv("CHROMA_HOST", "localhost")
-CHROMA_PORT = int(os.getenv("CHROMA_PORT", "8001"))
-LLM_MODEL = os.getenv("LLM_MODEL", "gpt-4o-mini")
+    docs = []
+    for e in evidence:
+        dim_weights = mapper.get_dimension_weights(e.signal_category)
+        primary_dim = mapper.get_primary_dimension(e.signal_category)
+        docs.append({
+            "doc_id": e.evidence_id,
+            "content": e.content,
+            "metadata": {
+                "company_id": e.company_id,
+                "source_type": e.source_type.value,
+                "dimension": primary_dim.value,
+                "confidence": e.confidence,
+            }
+        })
+    retriever.index_documents(docs)
+    print(f"[CS4] Indexed {len(docs)} documents")
 
+    # Step 5: Generate justification
+    generator = JustificationGenerator()
+    justification = await generator.generate_justification("NVDA", Dimension.DATA_INFRASTRUCTURE)
 
-# ---------------------------------------------------------------------------
-# Exercise helpers
-# ---------------------------------------------------------------------------
+    # Step 6: Display results
+    print("\n" + "="*60)
+    print("SCORE JUSTIFICATION")
+    print("="*60)
+    print(f"\nCompany: {company.name} ({company.ticker})")
+    print(f"Dimension: Data Infrastructure")
+    print(f"Score: {justification.score:.0f}/100 (Level {justification.level} - {justification.level_name})")
+    print(f"Confidence: [{justification.confidence_interval[0]:.0f}, {justification.confidence_interval[1]:.0f}]")
 
-def exercise_dimension_mapper() -> None:
-    """Exercise 1: verify DimensionMapper routing."""
-    print("\n=== Exercise 1: DimensionMapper ===")
-    dm = DimensionMapper()
-    for cat in [SignalCategory.TECHNOLOGY_HIRING, SignalCategory.GOVERNANCE_SIGNALS]:
-        weights = dm.get_dimension_weights(cat)
-        primary = dm.get_primary_dimension(cat)
-        dims = dm.get_all_dimensions_for_evidence(cat, min_weight=0.1)
-        print(f"\n{cat.value}:")
-        print(f"  primary dimension : {primary.value}")
-        print(f"  all weights       : { {d.value: float(w) for d, w in weights.items()} }")
-        print(f"  dims >= 0.10 wt   : {[d.value for d in dims]}")
+    print(f"\nRubric Match:")
+    print(f"  {justification.rubric_criteria[:200]}...")
 
+    print(f"\nSupporting Evidence ({len(justification.supporting_evidence)} items):")
+    for i, e in enumerate(justification.supporting_evidence, 1):
+        print(f"  {i}. [{e.source_type}] (conf={e.confidence:.2f})")
+        print(f"      {e.content[:100]}...")
+        if e.matched_keywords:
+            print(f"      Matched: {e.matched_keywords}")
 
-async def exercise_clients() -> None:
-    """Exercise 2: verify client imports and basic API connectivity."""
-    print("\n=== Exercise 2: Client Connectivity ===")
-    async with CS1Client(base_url=PLATFORM_URL) as cs1:
-        try:
-            companies = await cs1.list_companies(page_size=5)
-            print(f"CS1: found {len(companies)} companies (first 5)")
-            for c in companies[:3]:
-                print(f"  {c.ticker}: {c.name}")
-        except Exception as exc:
-            print(f"CS1: {exc} (is the platform running?)")
+    print(f"\nGaps Identified:")
+    for gap in justification.gaps_identified:
+        print(f"  - {gap}")
 
+    print(f"\nEvidence Strength: {justification.evidence_strength.upper()}")
+    print(f"\nGenerated Summary:")
+    print(f"  {justification.generated_summary}")
 
-async def exercise_full_pipeline() -> None:
-    """Exercise 3: full IC prep for TICKER."""
-    print(f"\n=== Exercise 3: Full IC Prep — {TICKER} ===")
-
-    retriever = HybridRetriever(
-        collection_name="cs4_evidence",
-        chroma_host=CHROMA_HOST,
-        chroma_port=CHROMA_PORT,
-    )
-
-    # Seed the retriever with a stub document so search doesn't fail on empty index
-    ingester = AnalystNoteIngester(retriever)
-    ingester.ingest_text(
-        content=(
-            f"{TICKER} has demonstrated strong AI integration across engineering teams. "
-            "Recent 10-K disclosures highlight significant R&D investment in machine learning "
-            "infrastructure and data platform modernisation."
-        ),
-        ticker=TICKER,
-        source_type="analyst_interview",
-        author="exercise_seed",
-    )
-
-    async with (
-        CS1Client(base_url=PLATFORM_URL) as cs1,
-        CS2Client(base_url=PLATFORM_URL) as cs2,
-        CS3Client(base_url=PLATFORM_URL) as cs3,
-    ):
-        workflow = ICPrepWorkflow(
-            cs1=cs1,
-            cs2=cs2,
-            cs3=cs3,
-            retriever=retriever,
-            generator=JustificationGenerator(model=LLM_MODEL),
-        )
-
-        result = await workflow.run(ticker=TICKER, assessment_id=ASSESSMENT_ID)
-
-    print(f"\nTicker    : {result.ticker}")
-    print(f"Company   : {result.company.name if result.company else 'N/A'}")
-    print(f"Chunks    : {len(result.evidence_chunks)}")
-    print(f"Errors    : {result.errors}")
-
-    if result.memo:
-        print(f"\n--- IC Memo ({result.memo.generated_by_model}) ---")
-        print(f"Assessment  : {result.memo.overall_assessment}")
-        print(f"Org-AI-R    : {result.memo.org_air_score}")
-        print(f"Recommendation: {result.memo.recommendation}")
-        print(f"Key risks   : {result.memo.key_risks[:3]}")
-    else:
-        print("\nNo memo generated (missing company/assessment or LLM key not set).")
-
-
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
-
-async def main() -> None:
-    exercise_dimension_mapper()
-    await exercise_clients()
-    await exercise_full_pipeline()
-    print("\nDone.")
-
+    # Cleanup
+    await cs1.close()
+    await cs2.close()
+    await cs3.close()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    asyncio.run(exercise_nvda_justification())

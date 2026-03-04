@@ -1,90 +1,94 @@
-"""
-router.py — CS4 RAG Search
-src/services/llm/router.py
-
-LiteLLM router with model fallback list.
-Primary model: gpt-4o; fallbacks: gpt-4o-mini → claude-sonnet-4-6.
-"""
-
-from __future__ import annotations
-
-import os
-from typing import Any, Dict, List, Optional
-
+"""Multi-model routing with LiteLLM and streaming support."""
+from typing import AsyncIterator, Dict, Any, List
+from enum import Enum
+from dataclasses import dataclass, field
+from datetime import date
+from decimal import Decimal
 import litellm
-from litellm import Router
-
+from litellm import acompletion
 import structlog
 
-logger = structlog.get_logger(__name__)
+logger = structlog.get_logger()
 
+class TaskType(str, Enum):
+    EVIDENCE_EXTRACTION = "evidence_extraction"
+    DIMENSION_SCORING = "dimension_scoring"
+    JUSTIFICATION_GENERATION = "justification_generation"
+    CHAT_RESPONSE = "chat_response"
 
-def build_router() -> Router:
-    """
-    Build a litellm.Router with tiered model fallbacks.
-    API keys are read from environment variables.
-    """
-    model_list = [
-        {
-            "model_name": "gpt-4o",
-            "litellm_params": {
-                "model": "gpt-4o",
-                "api_key": os.getenv("OPENAI_API_KEY", ""),
-            },
-        },
-        {
-            "model_name": "gpt-4o-mini",
-            "litellm_params": {
-                "model": "gpt-4o-mini",
-                "api_key": os.getenv("OPENAI_API_KEY", ""),
-            },
-        },
-        {
-            "model_name": "claude-sonnet",
-            "litellm_params": {
-                "model": "claude-sonnet-4-6",
-                "api_key": os.getenv("ANTHROPIC_API_KEY", ""),
-            },
-        },
-    ]
+@dataclass
+class ModelConfig:
+    primary: str
+    fallbacks: List[str]
+    temperature: float
+    max_tokens: int
+    cost_per_1k_tokens: float
 
-    return Router(
-        model_list=model_list,
-        fallbacks=[
-            {"gpt-4o": ["gpt-4o-mini", "claude-sonnet"]},
-        ],
-        allowed_fails=2,
-        retry_after=5,
-        num_retries=2,
-    )
+MODEL_ROUTING: Dict[TaskType, ModelConfig] = {
+    TaskType.EVIDENCE_EXTRACTION: ModelConfig(
+        primary="gpt-4o-2024-08-06",
+        fallbacks=["claude-sonnet-4-6-20250514"],
+        temperature=0.3, max_tokens=4000, cost_per_1k_tokens=0.015,
+    ),
+    TaskType.JUSTIFICATION_GENERATION: ModelConfig(
+        primary="claude-sonnet-4-6-20250514",
+        fallbacks=["gpt-4o-2024-08-06"],
+        temperature=0.2, max_tokens=2000, cost_per_1k_tokens=0.012,
+    ),
+    TaskType.CHAT_RESPONSE: ModelConfig(
+        primary="claude-haiku-4-5-20251001",
+        fallbacks=["gpt-3.5-turbo"],
+        temperature=0.7, max_tokens=1000, cost_per_1k_tokens=0.002,
+    ),
+}
 
+@dataclass
+class DailyBudget:
+    date: date = field(default_factory=date.today)
+    spent_usd: Decimal = Decimal("0")
+    limit_usd: Decimal = Decimal("50.00")
 
-# Module-level singleton
-_router: Optional[Router] = None
+    def can_spend(self, amount: Decimal) -> bool:
+        if self.date != date.today():
+            self.date, self.spent_usd = date.today(), Decimal("0")
+        return self.spent_usd + amount <= self.limit_usd
 
+class ModelRouter:
+    """Route LLM requests with fallbacks and cost tracking."""
 
-def get_router() -> Router:
-    global _router
-    if _router is None:
-        _router = build_router()
-    return _router
+    def __init__(self, daily_limit_usd: float = 50.0):
+        self.daily_budget = DailyBudget(limit_usd=Decimal(str(daily_limit_usd)))
 
+    async def complete(
+        self,
+        task: TaskType,
+        messages: List[Dict[str, str]],
+        stream: bool = False,
+        **kwargs
+    ) -> Any:
+        """Route completion request with fallbacks."""
+        config = MODEL_ROUTING[task]
+        for model in [config.primary] + config.fallbacks:
+            try:
+                if stream:
+                    return self._stream_complete(model, messages, config)
+                response = await acompletion(
+                    model=model, messages=messages,
+                    temperature=config.temperature, max_tokens=config.max_tokens,
+                )
+                logger.info("llm_complete", model=model, task=task.value)
+                return response
+            except Exception as e:
+                logger.warning("model_failed", model=model, error=str(e))
+        raise RuntimeError("All models failed")
 
-async def chat(
-    messages: List[Dict[str, str]],
-    model: str = "gpt-4o",
-    temperature: float = 0.2,
-    max_tokens: int = 2048,
-    **kwargs: Any,
-) -> str:
-    """Convenience wrapper — returns the assistant message content."""
-    router = get_router()
-    logger.info("llm call", model=model, message_count=len(messages))
-    response = await router.acompletion(
-        model=model,
-        messages=messages,
-        temperature=temperature,
-        max_tokens=max_tokens,
-        **kwargs,
-    )
-    return response.choices[0].message.content.strip()
+    async def _stream_complete(
+        self, model: str, messages: List[Dict], config: ModelConfig
+    ) -> AsyncIterator[str]:
+        response = await acompletion(
+            model=model, messages=messages, stream=True,
+            temperature=config.temperature,
+        )
+        async for chunk in response:
+            if chunk.choices[0].delta.content:
+                yield chunk.choices[0].delta.content

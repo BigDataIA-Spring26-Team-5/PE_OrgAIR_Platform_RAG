@@ -1,155 +1,99 @@
-"""
-hybrid.py — CS4 RAG Search
-src/services/retrieval/hybrid.py
-
-Hybrid BM25 + dense vector retrieval over ChromaDB.
-BM25 uses rank_bm25; dense embeddings use sentence-transformers + ChromaDB.
-"""
-
-from __future__ import annotations
-
-from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
-
-import chromadb
+"""Hybrid retrieval with RRF fusion."""
+from typing import List, Dict, Any, Optional
+from dataclasses import dataclass
+from collections import defaultdict
 from rank_bm25 import BM25Okapi
 from sentence_transformers import SentenceTransformer
-
+import chromadb
 
 @dataclass
-class RetrievedChunk:
-    chunk_id: str
-    text: str
+class RetrievedDocument:
+    doc_id: str
+    content: str
+    metadata: Dict[str, Any]
     score: float
-    source: str = ""
-    ticker: str = ""
-    metadata: Dict[str, Any] = field(default_factory=dict)
-
+    retrieval_method: str
 
 class HybridRetriever:
-    """
-    Two-stage retrieval:
-      1. BM25 keyword search over a local corpus
-      2. Dense vector search via ChromaDB
-    Results are fused with Reciprocal Rank Fusion (RRF).
-    """
+    """Hybrid retrieval combining dense and sparse search."""
 
-    def __init__(
-        self,
-        collection_name: str = "evidence",
-        chroma_host: str = "localhost",
-        chroma_port: int = 8001,
-        embed_model: str = "all-MiniLM-L6-v2",
-        bm25_weight: float = 0.3,
-        dense_weight: float = 0.7,
-    ) -> None:
-        self._collection_name = collection_name
-        self._bm25_weight = bm25_weight
-        self._dense_weight = dense_weight
-
-        self._encoder = SentenceTransformer(embed_model)
-        self._chroma = chromadb.HttpClient(host=chroma_host, port=chroma_port)
-        self._collection = self._chroma.get_or_create_collection(collection_name)
-
-        # BM25 index is built lazily on first search or after add_documents()
-        self._bm25: Optional[BM25Okapi] = None
-        self._bm25_corpus: List[str] = []
-        self._bm25_ids: List[str] = []
-
-    # ------------------------------------------------------------------
-    # Indexing
-    # ------------------------------------------------------------------
-
-    def add_documents(
-        self,
-        texts: List[str],
-        ids: List[str],
-        metadatas: Optional[List[Dict[str, Any]]] = None,
-    ) -> None:
-        """Embed and store documents; rebuild BM25 index."""
-        embeddings = self._encoder.encode(texts, show_progress_bar=False).tolist()
-        self._collection.upsert(
-            documents=texts,
-            ids=ids,
-            embeddings=embeddings,
-            metadatas=metadatas or [{} for _ in texts],
+    def __init__(self, dense_weight: float = 0.6, sparse_weight: float = 0.4, rrf_k: int = 60):
+        self.dense_weight = dense_weight
+        self.sparse_weight = sparse_weight
+        self.rrf_k = rrf_k
+        self.encoder = SentenceTransformer("all-MiniLM-L6-v2")
+        self.chroma = chromadb.PersistentClient(path="./chroma_data")
+        self.collection = self.chroma.get_or_create_collection(
+            name="pe_evidence", metadata={"hnsw:space": "cosine"}
         )
-        self._bm25_corpus = texts
-        self._bm25_ids = ids
-        tokenized = [t.lower().split() for t in texts]
-        self._bm25 = BM25Okapi(tokenized)
+        self._bm25, self._corpus, self._doc_ids, self._metadata = None, [], [], []
 
-    # ------------------------------------------------------------------
-    # Retrieval
-    # ------------------------------------------------------------------
+    def index_documents(self, documents: List[Dict[str, Any]]) -> int:
+        ids = [d["doc_id"] for d in documents]
+        contents = [d["content"] for d in documents]
+        metadatas = [d.get("metadata", {}) for d in documents]
 
-    def search(self, query: str, top_k: int = 10) -> List[RetrievedChunk]:
-        """Return top-k chunks using RRF-fused BM25 + dense scores."""
-        dense_results = self._dense_search(query, top_k)
-        bm25_results = self._bm25_search(query, top_k)
-        return self._rrf_fuse(dense_results, bm25_results, top_k)
+        # Dense indexing
+        embeddings = self.encoder.encode(contents).tolist()
+        self.collection.add(ids=ids, embeddings=embeddings, documents=contents, metadatas=metadatas)
 
-    def _dense_search(self, query: str, top_k: int) -> List[RetrievedChunk]:
-        embedding = self._encoder.encode([query], show_progress_bar=False).tolist()[0]
-        results = self._collection.query(
-            query_embeddings=[embedding],
-            n_results=min(top_k, self._collection.count() or 1),
-            include=["documents", "metadatas", "distances"],
-        )
-        chunks = []
-        for i, doc_id in enumerate(results["ids"][0]):
-            text = results["documents"][0][i]
-            dist = results["distances"][0][i]
-            meta = results["metadatas"][0][i] if results["metadatas"] else {}
-            chunks.append(RetrievedChunk(
-                chunk_id=doc_id,
-                text=text,
-                score=1.0 / (1.0 + dist),  # convert distance to similarity
-                source=meta.get("source", ""),
-                ticker=meta.get("ticker", ""),
-                metadata=meta,
-            ))
-        return chunks
+        # Sparse indexing
+        self._corpus.extend(contents)
+        self._doc_ids.extend(ids)
+        self._metadata.extend(metadatas)
+        self._bm25 = BM25Okapi([c.lower().split() for c in self._corpus])
+        return len(documents)
 
-    def _bm25_search(self, query: str, top_k: int) -> List[RetrievedChunk]:
-        if self._bm25 is None or not self._bm25_corpus:
-            return []
-        tokenized_query = query.lower().split()
-        scores = self._bm25.get_scores(tokenized_query)
-        ranked = sorted(enumerate(scores), key=lambda x: x[1], reverse=True)[:top_k]
-        chunks = []
-        for idx, score in ranked:
-            chunks.append(RetrievedChunk(
-                chunk_id=self._bm25_ids[idx],
-                text=self._bm25_corpus[idx],
-                score=float(score),
-            ))
-        return chunks
+    async def retrieve(
+        self,
+        query: str,
+        k: int = 10,
+        filter_metadata: Optional[Dict] = None,
+    ) -> List[RetrievedDocument]:
+        n = k * 3
 
-    @staticmethod
-    def _rrf_fuse(
-        dense: List[RetrievedChunk],
-        bm25: List[RetrievedChunk],
-        top_k: int,
-        k: int = 60,
-    ) -> List[RetrievedChunk]:
-        """Reciprocal Rank Fusion."""
-        scores: Dict[str, float] = {}
-        index: Dict[str, RetrievedChunk] = {}
+        # Dense retrieval
+        qe = self.encoder.encode(query).tolist()
+        dr = self.collection.query(query_embeddings=[qe], n_results=n, where=filter_metadata)
+        dense = [
+            RetrievedDocument(
+                doc_id=dr["ids"][0][i], content=dr["documents"][0][i],
+                metadata=dr["metadatas"][0][i], score=1 - dr["distances"][0][i],
+                retrieval_method="dense"
+            )
+            for i in range(len(dr["ids"][0]))
+        ]
 
-        for rank, chunk in enumerate(dense):
-            scores[chunk.chunk_id] = scores.get(chunk.chunk_id, 0.0) + 1.0 / (k + rank + 1)
-            index[chunk.chunk_id] = chunk
+        # Sparse retrieval
+        scores = self._bm25.get_scores(query.lower().split())
+        top_idx = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)[:n]
+        sparse = [
+            RetrievedDocument(
+                doc_id=self._doc_ids[i], content=self._corpus[i],
+                metadata=self._metadata[i], score=scores[i],
+                retrieval_method="sparse"
+            )
+            for i in top_idx
+        ]
 
-        for rank, chunk in enumerate(bm25):
-            scores[chunk.chunk_id] = scores.get(chunk.chunk_id, 0.0) + 1.0 / (k + rank + 1)
-            if chunk.chunk_id not in index:
-                index[chunk.chunk_id] = chunk
+        # RRF Fusion
+        return self._rrf_fusion(dense, sparse, k)
 
-        sorted_ids = sorted(scores, key=lambda cid: scores[cid], reverse=True)[:top_k]
-        results = []
-        for cid in sorted_ids:
-            chunk = index[cid]
-            chunk.score = scores[cid]
-            results.append(chunk)
-        return results
+    def _rrf_fusion(self, dense: List[RetrievedDocument], sparse: List[RetrievedDocument], k: int):
+        scores, doc_map = defaultdict(float), {}
+        for rank, doc in enumerate(dense):
+            scores[doc.doc_id] += self.dense_weight / (self.rrf_k + rank + 1)
+            doc_map[doc.doc_id] = doc
+        for rank, doc in enumerate(sparse):
+            scores[doc.doc_id] += self.sparse_weight / (self.rrf_k + rank + 1)
+            if doc.doc_id not in doc_map:
+                doc_map[doc.doc_id] = doc
+
+        sorted_ids = sorted(scores.keys(), key=lambda x: scores[x], reverse=True)[:k]
+        return [
+            RetrievedDocument(
+                doc_id=did, content=doc_map[did].content, metadata=doc_map[did].metadata,
+                score=scores[did], retrieval_method="hybrid"
+            )
+            for did in sorted_ids
+        ]

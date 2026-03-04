@@ -1,128 +1,158 @@
-"""
-ic_prep.py — CS4 RAG Search
-src/services/workflows/ic_prep.py
-
-IC preparation workflow: orchestrates CS1/CS2/CS3 clients → hybrid retrieval → IC memo.
-"""
-
-from __future__ import annotations
-
+"""Investment Committee meeting preparation workflow."""
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
-
-import structlog
-
-from ..integration.cs1_client import CS1Client, Company
-from ..integration.cs2_client import CS2Client, CS2Evidence
-from ..integration.cs3_client import CS3Client, CompanyAssessment
-from ..retrieval.hybrid import HybridRetriever, RetrievedChunk
-from ..justification.generator import JustificationGenerator, ICMemo
-
-logger = structlog.get_logger(__name__)
-
+from typing import List, Dict
+from datetime import datetime
+from services.justification.generator import JustificationGenerator, ScoreJustification
+from services.integration.cs1_client import CS1Client, Company
+from services.integration.cs3_client import CS3Client, Dimension, CompanyAssessment
 
 @dataclass
-class ICPrepResult:
-    ticker: str
-    company: Optional[Company]
-    assessment: Optional[CompanyAssessment]
-    evidence_chunks: List[RetrievedChunk]
-    memo: Optional[ICMemo]
-    errors: List[str]
+class ICMeetingPackage:
+    """Complete IC meeting preparation package."""
+    company: Company
+    assessment: CompanyAssessment
+    dimension_justifications: Dict[Dimension, ScoreJustification]
 
+    executive_summary: str
+    key_strengths: List[str]
+    key_gaps: List[str]
+    risk_factors: List[str]
+    recommendation: str
+
+    generated_at: str
+    total_evidence_count: int
+    avg_evidence_strength: str
 
 class ICPrepWorkflow:
-    """
-    End-to-end IC prep for a single ticker:
-      1. Fetch company metadata (CS1)
-      2. Fetch evidence signals (CS2)
-      3. Fetch dimension scores / assessment (CS3)
-      4. Retrieve relevant chunks via hybrid search
-      5. Generate IC memo
-    """
+    """Prepare complete IC meeting evidence package."""
 
-    def __init__(
+    def __init__(self):
+        self.cs1 = CS1Client()
+        self.cs3 = CS3Client()
+        self.generator = JustificationGenerator()
+
+    async def prepare_meeting(
         self,
-        cs1: CS1Client,
-        cs2: CS2Client,
-        cs3: CS3Client,
-        retriever: HybridRetriever,
-        generator: JustificationGenerator,
-    ) -> None:
-        self._cs1 = cs1
-        self._cs2 = cs2
-        self._cs3 = cs3
-        self._retriever = retriever
-        self._generator = generator
+        company_id: str,
+        focus_dimensions: List[Dimension] = None,
+    ) -> ICMeetingPackage:
+        """Generate complete IC meeting package."""
+        if focus_dimensions is None:
+            focus_dimensions = list(Dimension)
 
-    async def run(self, ticker: str, assessment_id: Optional[str] = None) -> ICPrepResult:
-        errors: List[str] = []
-        company: Optional[Company] = None
-        assessment: Optional[CompanyAssessment] = None
-        evidence: List[CS2Evidence] = []
+        # 1. Fetch company from CS1
+        company = await self.cs1.get_company(company_id)
 
-        # Step 1 — company metadata
-        try:
-            company = await self._cs1.get_company(ticker)
-            logger.info("fetched company", ticker=ticker, name=company.name)
-        except Exception as exc:
-            errors.append(f"CS1 error: {exc}")
-            logger.warning("cs1 fetch failed", ticker=ticker, error=str(exc))
+        # 2. Fetch assessment from CS3
+        assessment = await self.cs3.get_assessment(company_id)
 
-        # Step 2 — evidence signals
-        try:
-            evidence = await self._cs2.get_evidence(ticker)
-            logger.info("fetched evidence", ticker=ticker, count=len(evidence))
-        except Exception as exc:
-            errors.append(f"CS2 error: {exc}")
-            logger.warning("cs2 fetch failed", ticker=ticker, error=str(exc))
+        # 3. Generate justifications for each dimension
+        justifications = {}
+        for dim in focus_dimensions:
+            justifications[dim] = await self.generator.generate_justification(
+                company_id=company_id, dimension=dim
+            )
 
-        # Step 3 — assessment + dimension scores
-        if assessment_id:
-            try:
-                assessment = await self._cs3.get_assessment(assessment_id)
-                logger.info("fetched assessment", ticker=ticker, id=assessment_id)
-            except Exception as exc:
-                errors.append(f"CS3 error: {exc}")
-                logger.warning("cs3 fetch failed", ticker=ticker, error=str(exc))
+        # 4. Synthesize findings
+        strengths = self._identify_strengths(assessment, justifications)
+        gaps = self._identify_gaps(justifications)
+        risks = self._assess_risks(assessment, justifications)
 
-        # Step 4 — hybrid retrieval
-        query = f"{ticker} AI readiness digital transformation organizational capability"
-        chunks = self._retriever.search(query, top_k=10)
+        # 5. Generate executive summary
+        summary = self._generate_summary(company, assessment, justifications)
 
-        # Step 5 — IC memo generation
-        memo: Optional[ICMemo] = None
-        if company and assessment:
-            dim_scores = [
-                {
-                    "dimension": ds.dimension.value,
-                    "score": ds.score,
-                    "confidence": ds.confidence,
-                }
-                for ds in assessment.dimension_scores
-            ]
-            try:
-                memo = await self._generator.generate(
-                    ticker=ticker,
-                    company_name=company.name,
-                    dimension_scores=dim_scores,
-                    evidence_chunks=chunks,
-                    org_air_score=assessment.v_r_score,
-                    confidence_interval=(
-                        (assessment.confidence_lower, assessment.confidence_upper)
-                        if assessment.confidence_lower and assessment.confidence_upper
-                        else None
-                    ),
-                )
-            except Exception as exc:
-                errors.append(f"memo generation error: {exc}")
-                logger.error("memo generation failed", ticker=ticker, error=str(exc))
+        # 6. Generate recommendation
+        recommendation = self._generate_recommendation(assessment, strengths, gaps)
 
-        return ICPrepResult(
-            ticker=ticker,
+        # Calculate stats
+        total_evidence = sum(len(j.supporting_evidence) for j in justifications.values())
+        strength_scores = {"strong": 3, "moderate": 2, "weak": 1}
+        avg_strength_num = sum(
+            strength_scores[j.evidence_strength] for j in justifications.values()
+        ) / len(justifications)
+        avg_strength = "strong" if avg_strength_num >= 2.5 else "moderate" if avg_strength_num >= 1.5 else "weak"
+
+        return ICMeetingPackage(
             company=company,
             assessment=assessment,
-            evidence_chunks=chunks,
-            memo=memo,
-            errors=errors,
+            dimension_justifications=justifications,
+            executive_summary=summary,
+            key_strengths=strengths,
+            key_gaps=gaps,
+            risk_factors=risks,
+            recommendation=recommendation,
+            generated_at=datetime.now().isoformat(),
+            total_evidence_count=total_evidence,
+            avg_evidence_strength=avg_strength,
         )
+
+    def _identify_strengths(
+        self,
+        assessment: CompanyAssessment,
+        justifications: Dict[Dimension, ScoreJustification]
+    ) -> List[str]:
+        """Identify top 3 strengths."""
+        strengths = []
+        for dim, j in justifications.items():
+            if j.level >= 4 and j.evidence_strength in ["strong", "moderate"]:
+                strengths.append(
+                    f"{dim.value.replace('_', ' ').title()}: Level {j.level} ({j.level_name}) "
+                    f"- {len(j.supporting_evidence)} evidence items"
+                )
+        return sorted(strengths, key=lambda x: -int(x.split("Level ")[1][0]))[:3]
+
+    def _identify_gaps(
+        self, justifications: Dict[Dimension, ScoreJustification]
+    ) -> List[str]:
+        """Identify critical gaps across dimensions."""
+        gaps = []
+        for dim, j in justifications.items():
+            if j.level <= 2:
+                gaps.append(f"{dim.value.replace('_', ' ').title()}: Level {j.level} - needs investment")
+            gaps.extend(j.gaps_identified[:2])
+        return gaps[:5]
+
+    def _assess_risks(
+        self,
+        assessment: CompanyAssessment,
+        justifications: Dict[Dimension, ScoreJustification]
+    ) -> List[str]:
+        """Assess execution risks."""
+        risks = []
+        if assessment.talent_concentration > 0.25:
+            risks.append(f"High talent concentration ({assessment.talent_concentration:.2f}) - key person risk")
+        if assessment.position_factor < 0:
+            risks.append(f"Below-average sector position (factor={assessment.position_factor:.2f})")
+        weak_dims = [dim for dim, j in justifications.items() if j.evidence_strength == "weak"]
+        if weak_dims:
+            risks.append(f"Weak evidence for: {', '.join(d.value for d in weak_dims)}")
+        return risks[:5]
+
+    def _generate_summary(
+        self, company: Company, assessment: CompanyAssessment,
+        justifications: Dict[Dimension, ScoreJustification]
+    ) -> str:
+        """Generate executive summary paragraph."""
+        strong_dims = [d for d, j in justifications.items() if j.level >= 4]
+        weak_dims = [d for d, j in justifications.items() if j.level <= 2]
+
+        return (
+            f"{company.name} ({company.ticker}) scores {assessment.org_air_score:.0f} on Org-AI-R "
+            f"({assessment.confidence_interval[0]:.0f}-{assessment.confidence_interval[1]:.0f} 95% CI). "
+            f"V^R={assessment.vr_score:.0f}, H^R={assessment.hr_score:.0f}. "
+            f"Strengths in {', '.join(d.value.replace('_', ' ') for d in strong_dims[:2])}. "
+            + (f"Gaps in {', '.join(d.value.replace('_', ' ') for d in weak_dims[:2])}. " if weak_dims else "")
+            + f"Position factor: {assessment.position_factor:+.2f} vs sector peers."
+        )
+
+    def _generate_recommendation(
+        self, assessment: CompanyAssessment,
+        strengths: List[str], gaps: List[str]
+    ) -> str:
+        """Generate investment recommendation."""
+        if assessment.org_air_score >= 70 and len(strengths) >= 2:
+            return "PROCEED - Strong AI readiness with solid evidence base"
+        elif assessment.org_air_score >= 50:
+            return "PROCEED WITH CAUTION - Moderate AI readiness, gaps addressable"
+        else:
+            return "FURTHER DILIGENCE - Significant AI capability gaps identified"

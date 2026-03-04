@@ -1,80 +1,113 @@
-"""
-analyst_notes.py — CS4 RAG Search
-src/services/collection/analyst_notes.py
-
-Stub for ingesting analyst interview notes and data room documents into ChromaDB.
-"""
-
-from __future__ import annotations
-
-import uuid
+"""Collect and index analyst notes and interview transcripts."""
 from dataclasses import dataclass, field
+from typing import List, Optional
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from enum import Enum
+from services.retrieval.hybrid import HybridRetriever
+from services.retrieval.dimension_mapper import DimensionMapper
 
-import structlog
-
-from ..retrieval.hybrid import HybridRetriever
-
-logger = structlog.get_logger(__name__)
-
+class NoteType(str, Enum):
+    INTERVIEW_TRANSCRIPT = "interview_transcript"
+    MANAGEMENT_MEETING = "management_meeting"
+    SITE_VISIT = "site_visit"
+    DD_FINDING = "dd_finding"
+    DATA_ROOM_SUMMARY = "data_room_summary"
 
 @dataclass
 class AnalystNote:
-    """A single analyst note or data room document."""
+    """Analyst-generated evidence."""
+    note_id: str
+    company_id: str
+    note_type: NoteType
+    title: str
     content: str
-    ticker: str
-    source_type: str = "analyst_interview"  # or "dd_data_room"
-    author: Optional[str] = None
-    note_date: Optional[datetime] = None
-    tags: List[str] = field(default_factory=list)
-    note_id: str = field(default_factory=lambda: str(uuid.uuid4()))
-    metadata: Dict[str, Any] = field(default_factory=dict)
 
+    # Interview metadata
+    interviewee: Optional[str] = None
+    interviewee_title: Optional[str] = None
 
-class AnalystNoteIngester:
-    """
-    Ingests analyst notes into the hybrid retriever's index.
-    Stub implementation — extend with file parsing (PDF, DOCX) as needed.
-    """
+    # Assessment context
+    dimensions_discussed: List[str] = field(default_factory=list)
+    key_findings: List[str] = field(default_factory=list)
+    risk_flags: List[str] = field(default_factory=list)
 
-    def __init__(self, retriever: HybridRetriever) -> None:
-        self._retriever = retriever
+    # Provenance
+    assessor: str = ""
+    created_at: datetime = field(default_factory=datetime.now)
+    confidence: float = 1.0  # Primary source = high confidence
 
-    def ingest(self, notes: List[AnalystNote]) -> int:
-        """
-        Add notes to the retrieval index.
-        Returns number of notes indexed.
-        """
-        if not notes:
-            return 0
+class AnalystNotesCollector:
+    """API for analysts to submit and index notes."""
 
-        texts = [n.content for n in notes]
-        ids = [n.note_id for n in notes]
-        metadatas = [
-            {
-                "ticker": n.ticker,
-                "source": n.source_type,
-                "author": n.author or "",
-                "note_date": n.note_date.isoformat() if n.note_date else "",
-                "tags": ",".join(n.tags),
-                **n.metadata,
+    def __init__(self, retriever: HybridRetriever):
+        self.retriever = retriever
+        self.mapper = DimensionMapper()
+
+    async def submit_interview(
+        self, company_id: str, interviewee: str, interviewee_title: str,
+        transcript: str, assessor: str, dimensions_discussed: List[str],
+    ) -> str:
+        """Submit interview transcript for indexing."""
+        note_id = f"interview_{company_id}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
+
+        # Determine primary dimension
+        primary_dim = dimensions_discussed[0] if dimensions_discussed else "leadership"
+
+        doc = {
+            "doc_id": note_id,
+            "content": f"Interview: {interviewee_title}\n\n{transcript}",
+            "metadata": {
+                "company_id": company_id,
+                "source_type": NoteType.INTERVIEW_TRANSCRIPT.value,
+                "dimension": primary_dim,
+                "confidence": 1.0,  # Primary source
+                "assessor": assessor,
+                "interviewee_title": interviewee_title,
             }
-            for n in notes
-        ]
+        }
+        self.retriever.index_documents([doc])
+        return note_id
 
-        self._retriever.add_documents(texts, ids, metadatas)
-        logger.info("analyst notes indexed", count=len(notes))
-        return len(notes)
+    async def submit_dd_finding(
+        self, company_id: str, title: str, finding: str,
+        dimension: str, severity: str, assessor: str,
+    ) -> str:
+        """Submit due diligence finding."""
+        note_id = f"dd_{company_id}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
 
-    def ingest_text(
-        self,
-        content: str,
-        ticker: str,
-        source_type: str = "analyst_interview",
-        **kwargs: Any,
-    ) -> AnalystNote:
-        """Convenience method: create and ingest a single note."""
-        note = AnalystNote(content=content, ticker=ticker, source_type=source_type, **kwargs)
-        self.ingest([note])
-        return note
+        doc = {
+            "doc_id": note_id,
+            "content": f"{title}\n\n{finding}",
+            "metadata": {
+                "company_id": company_id,
+                "source_type": NoteType.DD_FINDING.value,
+                "dimension": dimension,
+                "confidence": 1.0,
+                "assessor": assessor,
+                "severity": severity,
+            }
+        }
+        self.retriever.index_documents([doc])
+        return note_id
+
+    async def submit_data_room_summary(
+        self, company_id: str, document_name: str, summary: str,
+        dimension: str, assessor: str,
+    ) -> str:
+        """Submit data room document summary."""
+        note_id = f"dataroom_{company_id}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
+
+        doc = {
+            "doc_id": note_id,
+            "content": f"Data Room: {document_name}\n\n{summary}",
+            "metadata": {
+                "company_id": company_id,
+                "source_type": NoteType.DATA_ROOM_SUMMARY.value,
+                "dimension": dimension,
+                "confidence": 1.0,
+                "assessor": assessor,
+                "document_name": document_name,
+            }
+        }
+        self.retriever.index_documents([doc])
+        return note_id

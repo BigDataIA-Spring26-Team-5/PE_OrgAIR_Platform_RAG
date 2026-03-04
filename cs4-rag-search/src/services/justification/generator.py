@@ -1,194 +1,188 @@
-"""
-generator.py — CS4 RAG Search
-src/services/justification/generator.py
-
-Structured IC memo generation.
-Produces a JSON-structured investment committee memo grounded in retrieved evidence.
-"""
-
-from __future__ import annotations
-
-import json
+"""Generate score justifications with cited evidence."""
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
-
-import structlog
-
-from ..llm.router import chat
-from ..retrieval.hybrid import RetrievedChunk
-
-logger = structlog.get_logger(__name__)
-
-
-# ---------------------------------------------------------------------------
-# Output schema
-# ---------------------------------------------------------------------------
+from typing import List, Optional
+from services.integration.cs3_client import CS3Client, Dimension, DimensionScore, RubricCriteria, ScoreLevel
+from services.retrieval.hybrid import HybridRetriever, RetrievedDocument
+from services.llm.router import ModelRouter, TaskType
 
 @dataclass
-class DimensionJustification:
-    dimension: str
-    score: Optional[float]
-    level_label: Optional[str]
-    narrative: str
-    supporting_quotes: List[str] = field(default_factory=list)
-    risk_flags: List[str] = field(default_factory=list)
-
+class CitedEvidence:
+    """Evidence with citation details."""
+    evidence_id: str
+    content: str  # Truncated to 500 chars
+    source_type: str
+    source_url: Optional[str]
+    confidence: float
+    matched_keywords: List[str]
+    relevance_score: float
 
 @dataclass
-class ICMemo:
-    ticker: str
-    company_name: str
-    overall_assessment: str
-    org_air_score: Optional[float]
-    confidence_interval: Optional[tuple[float, float]]
-    dimension_justifications: List[DimensionJustification] = field(default_factory=list)
-    key_risks: List[str] = field(default_factory=list)
-    key_opportunities: List[str] = field(default_factory=list)
-    recommendation: str = ""
-    generated_by_model: str = ""
+class ScoreJustification:
+    """Complete score justification for IC presentation."""
+    company_id: str
+    dimension: Dimension
+    score: float
+    level: int
+    level_name: str
+    confidence_interval: tuple
 
+    rubric_criteria: str
+    rubric_keywords: List[str]
 
-# ---------------------------------------------------------------------------
-# System prompt
-# ---------------------------------------------------------------------------
+    supporting_evidence: List[CitedEvidence]
+    gaps_identified: List[str]
 
-_SYSTEM_PROMPT = """You are a senior PE investment analyst writing an IC memo section.
-You will be given:
-  - Company ticker and name
-  - CS3 dimension scores (0–100 scale, 7 dimensions)
-  - Retrieved evidence chunks from SEC filings, job postings, and analyst notes
+    generated_summary: str
+    evidence_strength: str  # "strong", "moderate", "weak"
 
-Write a structured JSON memo with the following fields:
-{
-  "overall_assessment": "<2-3 sentence executive summary>",
-  "dimension_justifications": [
-    {
-      "dimension": "<dimension name>",
-      "narrative": "<2-3 sentences grounded in evidence>",
-      "supporting_quotes": ["<verbatim quote from evidence>", ...],
-      "risk_flags": ["<specific risk>", ...]
-    },
-    ...
-  ],
-  "key_risks": ["<risk>", ...],
-  "key_opportunities": ["<opportunity>", ...],
-  "recommendation": "<BUY / HOLD / PASS with one sentence rationale>"
-}
+JUSTIFICATION_PROMPT = """You are a PE analyst preparing score justification for an investment committee.
 
-Be specific. Quote evidence directly. Flag gaps where evidence is absent.
-Output only valid JSON — no prose outside the JSON block."""
+COMPANY: {company_id}
+DIMENSION: {dimension}
+SCORE: {score}/100 (Level {level} - {level_name})
 
+RUBRIC CRITERIA FOR THIS LEVEL:
+{rubric_criteria}
 
-# ---------------------------------------------------------------------------
-# JustificationGenerator
-# ---------------------------------------------------------------------------
+RUBRIC KEYWORDS TO MATCH:
+{rubric_keywords}
+
+SUPPORTING EVIDENCE FOUND:
+{evidence_text}
+
+Generate a concise IC-ready justification (150-200 words) that:
+1. States why the score matches this rubric level
+2. Cites specific evidence with source references [Source Type, FY]
+3. Identifies gaps preventing a higher score
+4. Assesses evidence strength (strong/moderate/weak)
+
+Write in professional PE memo style."""
 
 class JustificationGenerator:
-    """Generates a structured IC memo from dimension scores + retrieved chunks."""
+    """Generate score justifications."""
 
-    def __init__(self, model: str = "gpt-4o", temperature: float = 0.2) -> None:
-        self._model = model
-        self._temperature = temperature
+    def __init__(self):
+        self.cs3 = CS3Client()
+        self.retriever = HybridRetriever()
+        self.router = ModelRouter()
 
-    async def generate(
-        self,
-        ticker: str,
-        company_name: str,
-        dimension_scores: List[Dict[str, Any]],
-        evidence_chunks: List[RetrievedChunk],
-        org_air_score: Optional[float] = None,
-        confidence_interval: Optional[tuple[float, float]] = None,
-    ) -> ICMemo:
-        """Generate an IC memo grounded in retrieved evidence chunks."""
-        logger.info("generating IC memo", ticker=ticker, chunks=len(evidence_chunks))
+    async def generate_justification(
+        self, company_id: str, dimension: Dimension
+    ) -> ScoreJustification:
+        """Generate full justification for a dimension score."""
 
-        user_content = self._build_user_message(
-            ticker, company_name, dimension_scores, evidence_chunks,
-            org_air_score, confidence_interval,
-        )
-        raw = await chat(
-            messages=[
-                {"role": "system", "content": _SYSTEM_PROMPT},
-                {"role": "user", "content": user_content},
-            ],
-            model=self._model,
-            temperature=self._temperature,
+        # 1. Fetch score from CS3
+        score = await self.cs3.get_dimension_score(company_id, dimension)
+
+        # 2. Get rubric for that level
+        rubrics = await self.cs3.get_rubric(dimension, score.level)
+        rubric = rubrics[0] if rubrics else None
+
+        # 3. Build search query from rubric keywords
+        query = " ".join(rubric.keywords[:5]) if rubric else dimension.value.replace("_", " ")
+
+        # 4. Search for evidence
+        results = await self.retriever.retrieve(
+            query=query, k=15,
+            filter_metadata={"company_id": company_id, "dimension": dimension.value}
         )
 
-        return self._parse_response(raw, ticker, company_name, org_air_score, confidence_interval)
+        # 5. Match evidence to rubric keywords
+        cited = self._match_to_rubric(results, rubric)
 
-    def _build_user_message(
-        self,
-        ticker: str,
-        company_name: str,
-        dimension_scores: List[Dict[str, Any]],
-        chunks: List[RetrievedChunk],
-        org_air_score: Optional[float],
-        ci: Optional[tuple[float, float]],
-    ) -> str:
-        scores_text = "\n".join(
-            f"  {s.get('dimension', '?')}: {s.get('score', 'N/A')} "
-            f"(confidence {s.get('confidence', '?')})"
-            for s in dimension_scores
-        )
-        evidence_text = "\n\n".join(
-            f"[{i+1}] Source={c.source} Ticker={c.ticker}\n{c.text[:600]}"
-            for i, c in enumerate(chunks[:12])
-        )
-        org_line = (
-            f"Org-AI-R Score: {org_air_score:.1f} "
-            f"(95% CI: {ci[0]:.1f}–{ci[1]:.1f})"
-            if org_air_score is not None and ci
-            else ""
-        )
-        return (
-            f"Company: {company_name} ({ticker})\n"
-            f"{org_line}\n\n"
-            f"Dimension Scores:\n{scores_text}\n\n"
-            f"Evidence Chunks:\n{evidence_text}"
+        # 6. Identify gaps (next level criteria not found)
+        gaps = await self._identify_gaps(company_id, dimension, score.level, results)
+
+        # 7. Generate summary with LLM
+        evidence_text = "\n".join([
+            f"[{e.source_type}, conf={e.confidence:.2f}] {e.content[:300]}..."
+            for e in cited[:5]
+        ])
+
+        response = await self.router.complete(
+            task=TaskType.JUSTIFICATION_GENERATION,
+            messages=[{"role": "user", "content": JUSTIFICATION_PROMPT.format(
+                company_id=company_id,
+                dimension=dimension.value.replace("_", " ").title(),
+                score=score.score,
+                level=score.level.value,
+                level_name=score.level.name_label,
+                rubric_criteria=rubric.criteria_text if rubric else "N/A",
+                rubric_keywords=", ".join(rubric.keywords) if rubric else "N/A",
+                evidence_text=evidence_text,
+            )}]
         )
 
-    def _parse_response(
-        self,
-        raw: str,
-        ticker: str,
-        company_name: str,
-        org_air_score: Optional[float],
-        ci: Optional[tuple[float, float]],
-    ) -> ICMemo:
-        # Strip markdown code fences if present
-        clean = raw.strip()
-        if clean.startswith("```"):
-            clean = clean.split("```")[1]
-            if clean.startswith("json"):
-                clean = clean[4:]
-        try:
-            data = json.loads(clean)
-        except json.JSONDecodeError:
-            logger.warning("failed to parse LLM JSON", raw=raw[:200])
-            data = {}
+        summary = response.choices[0].message.content
+        strength = self._assess_strength(cited)
 
-        dim_justifications = [
-            DimensionJustification(
-                dimension=dj.get("dimension", ""),
-                score=None,
-                level_label=None,
-                narrative=dj.get("narrative", ""),
-                supporting_quotes=dj.get("supporting_quotes", []),
-                risk_flags=dj.get("risk_flags", []),
-            )
-            for dj in data.get("dimension_justifications", [])
-        ]
-
-        return ICMemo(
-            ticker=ticker,
-            company_name=company_name,
-            overall_assessment=data.get("overall_assessment", ""),
-            org_air_score=org_air_score,
-            confidence_interval=ci,
-            dimension_justifications=dim_justifications,
-            key_risks=data.get("key_risks", []),
-            key_opportunities=data.get("key_opportunities", []),
-            recommendation=data.get("recommendation", ""),
-            generated_by_model=self._model,
+        return ScoreJustification(
+            company_id=company_id,
+            dimension=dimension,
+            score=score.score,
+            level=score.level.value,
+            level_name=score.level.name_label,
+            confidence_interval=score.confidence_interval,
+            rubric_criteria=rubric.criteria_text if rubric else "",
+            rubric_keywords=rubric.keywords if rubric else [],
+            supporting_evidence=cited,
+            gaps_identified=gaps,
+            generated_summary=summary,
+            evidence_strength=strength,
         )
+
+    def _match_to_rubric(
+        self, results: List[RetrievedDocument], rubric: Optional[RubricCriteria]
+    ) -> List[CitedEvidence]:
+        if not rubric:
+            return []
+
+        cited = []
+        for r in results:
+            matched = [kw for kw in rubric.keywords if kw.lower() in r.content.lower()]
+            if matched or r.score > 0.7:
+                cited.append(CitedEvidence(
+                    evidence_id=r.doc_id,
+                    content=r.content[:500],
+                    source_type=r.metadata.get("source_type", "unknown"),
+                    source_url=r.metadata.get("source_url"),
+                    confidence=r.metadata.get("confidence", 0.5),
+                    matched_keywords=matched,
+                    relevance_score=r.score,
+                ))
+        return sorted(cited, key=lambda x: len(x.matched_keywords), reverse=True)[:5]
+
+    async def _identify_gaps(
+        self, company_id: str, dimension: Dimension,
+        current_level: ScoreLevel, evidence: List[RetrievedDocument]
+    ) -> List[str]:
+        """Find criteria from next level not matched in evidence."""
+        if current_level == ScoreLevel.LEVEL_5:
+            return []  # Already at top
+
+        next_level = ScoreLevel(current_level.value + 1)
+        next_rubrics = await self.cs3.get_rubric(dimension, next_level)
+        if not next_rubrics:
+            return []
+
+        next_rubric = next_rubrics[0]
+        evidence_text = " ".join([e.content.lower() for e in evidence])
+
+        gaps = []
+        for kw in next_rubric.keywords:
+            if kw.lower() not in evidence_text:
+                gaps.append(f"No evidence of '{kw}' (Level {next_level.value} criterion)")
+
+        return gaps[:5]
+
+    def _assess_strength(self, evidence: List[CitedEvidence]) -> str:
+        if not evidence:
+            return "weak"
+        avg_conf = sum(e.confidence for e in evidence) / len(evidence)
+        avg_matches = sum(len(e.matched_keywords) for e in evidence) / len(evidence)
+
+        if avg_conf >= 0.8 and avg_matches >= 2:
+            return "strong"
+        elif avg_conf >= 0.6 or avg_matches >= 1:
+            return "moderate"
+        return "weak"
