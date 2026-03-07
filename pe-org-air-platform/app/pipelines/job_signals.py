@@ -324,16 +324,62 @@ def step3_classify_ai_jobs(state: SignalPipelineState) -> SignalPipelineState:
       - CONTEXTUAL keywords (e.g. "data scientist"): must appear in TITLE,
         or appear 2+ times in description, to count. A single mention
         in a boilerplate "about us" paragraph doesn't qualify.
+
+    Groq expands both keyword sets with company-specific terms once per company
+    before classification begins, so industry-specific vocabulary (e.g.
+    "recommendation engine" for Netflix, "GPU compute" for NVIDIA) is captured.
     """
     from app.pipelines.keywords import (
         AI_KEYWORDS_STRONG, AI_KEYWORDS_CONTEXTUAL,
         AI_SKILLS, AI_TECHSTACK_KEYWORDS,
     )
+    from app.services.groq_enrichment import get_dimension_keywords
 
     logger.info("-" * 40)
     logger.info("🤖 [3/4] CLASSIFYING AI-RELATED JOBS")
 
+    # ------------------------------------------------------------------
+    # Build per-company expanded keyword sets via Groq (called once each)
+    # ------------------------------------------------------------------
+    company_strong: Dict[str, frozenset] = {}
+    company_contextual: Dict[str, frozenset] = {}
+    company_skills: Dict[str, frozenset] = {}
+
+    for company in state.companies:
+        ticker = company.get("ticker", "").upper()
+        name = company.get("name", ticker)
+        cid = company.get("id", "")
+        try:
+            # Pass a representative sample as context; merge extras with full base set
+            sample_strong = list(AI_KEYWORDS_STRONG)[:15]
+            groq_strong = get_dimension_keywords(ticker, name, "ai_job_keywords", sample_strong)
+            company_strong[cid] = AI_KEYWORDS_STRONG | frozenset(k for k in groq_strong if k not in sample_strong)
+
+            groq_ctx = get_dimension_keywords(ticker, name, "ai_job_contextual", list(AI_KEYWORDS_CONTEXTUAL))
+            company_contextual[cid] = AI_KEYWORDS_CONTEXTUAL | frozenset(k for k in groq_ctx if k not in AI_KEYWORDS_CONTEXTUAL)
+
+            groq_skills = get_dimension_keywords(ticker, name, "ai_skills", list(AI_SKILLS))
+            company_skills[cid] = AI_SKILLS | frozenset(k for k in groq_skills if k not in AI_SKILLS)
+
+            logger.info(
+                f"   [{ticker}] Groq-expanded: {len(company_strong[cid])} strong kws, "
+                f"{len(company_contextual[cid])} contextual kws, {len(company_skills[cid])} skills"
+            )
+        except Exception as exc:
+            logger.warning(f"   [{ticker}] Groq keyword expansion failed: {exc} — using base keywords")
+            company_strong[cid] = AI_KEYWORDS_STRONG
+            company_contextual[cid] = AI_KEYWORDS_CONTEXTUAL
+            company_skills[cid] = AI_SKILLS
+
+    # ------------------------------------------------------------------
+    # Classify each posting using its company's expanded keyword set
+    # ------------------------------------------------------------------
     for posting in state.job_postings:
+        cid = posting.get("company_id", "")
+        kws_strong = company_strong.get(cid, AI_KEYWORDS_STRONG)
+        kws_contextual = company_contextual.get(cid, AI_KEYWORDS_CONTEXTUAL)
+        kws_skills = company_skills.get(cid, AI_SKILLS)
+
         title = posting.get("title", "")
         desc = posting.get("description", "") or ""
 
@@ -342,11 +388,11 @@ def step3_classify_ai_jobs(state: SignalPipelineState) -> SignalPipelineState:
         full_text = f"{title_lower} {desc_lower}"
 
         # --- Strong keywords: single match anywhere is enough ---
-        strong_matches = [kw for kw in AI_KEYWORDS_STRONG if kw in full_text]
+        strong_matches = [kw for kw in kws_strong if kw in full_text]
 
         # --- Contextual keywords: must be in title OR 2+ times in description ---
         contextual_matches = []
-        for kw in AI_KEYWORDS_CONTEXTUAL:
+        for kw in kws_contextual:
             in_title = kw in title_lower
             desc_count = desc_lower.count(kw)
             if in_title or desc_count >= 2:
@@ -355,7 +401,7 @@ def step3_classify_ai_jobs(state: SignalPipelineState) -> SignalPipelineState:
         ai_kw = strong_matches + contextual_matches
 
         # Find AI skills (for diversity scoring)
-        skills = [sk for sk in AI_SKILLS if sk in full_text]
+        skills = [sk for sk in kws_skills if sk in full_text]
 
         # Find techstack keywords (kept for metadata)
         ts_kw = [kw for kw in AI_TECHSTACK_KEYWORDS if kw in full_text]

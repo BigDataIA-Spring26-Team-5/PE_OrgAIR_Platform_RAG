@@ -372,6 +372,7 @@ class TechStackCollector:
         company_id: str,
         ticker: str,
         domain: Optional[str] = None,
+        company_name: Optional[str] = None,
     ) -> TechStackResult:
         """
         Full tech stack analysis for a single company.
@@ -380,6 +381,7 @@ class TechStackCollector:
             company_id: Company UUID
             ticker: Stock ticker
             domain: Company website domain (auto-resolved from config if None)
+            company_name: Official company name (used to derive domain if not in config)
 
         Returns:
             TechStackResult with scores and detections
@@ -388,6 +390,19 @@ class TechStackCollector:
         if not domain:
             mapping = COMPANY_NAME_MAPPINGS.get(ticker.upper(), {})
             domain = mapping.get("domain")
+        if not domain and company_name:
+            # Derive a best-guess domain from company name
+            import re as _re
+            # Strip common legal suffixes
+            clean = _re.sub(
+                r",?\s*(Inc\.?|Corp\.?|LLC\.?|Ltd\.?|Co\.?|Holdings?|Group|PLC|N\.A\.?|S\.A\.?|AG)\.?\s*$",
+                "", company_name, flags=_re.IGNORECASE,
+            ).strip()
+            # Keep only alphanumeric chars, lowercase
+            clean = _re.sub(r"[^a-zA-Z0-9]", "", clean).lower()
+            if clean:
+                domain = f"{clean}.com"
+                logger.info(f"No domain configured for {ticker}; derived fallback: {domain}")
         if not domain:
             logger.error(f"No domain configured for {ticker}")
             return TechStackResult(
@@ -590,8 +605,9 @@ class TechStackCollector:
         for company in companies:
             cid = company.get("id", "")
             ticker = company.get("ticker", "")
+            company_name = company.get("name")
             try:
-                result = await self.analyze_company(cid, ticker)
+                result = await self.analyze_company(cid, ticker, company_name=company_name)
                 results[cid] = result
             except Exception as e:
                 logger.error(f"Failed to analyze {ticker}: {e}")

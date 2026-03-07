@@ -94,21 +94,23 @@ class SectionAnalyzer:
     
     def count_keywords(self, text: str) -> Dict[str, int]:
         """Count occurrences of each keyword in text"""
+        return self._count_keywords_with_list(text, self.AI_KEYWORDS)
+
+    def _count_keywords_with_list(self, text: str, ai_keywords: List[str]) -> Dict[str, int]:
+        """Count occurrences of the given ai_keywords list plus TECH_KEYWORDS in text."""
         text_lower = text.lower()
         counts = {}
-        
-        # Count AI keywords
-        for keyword in self.AI_KEYWORDS:
+
+        for keyword in ai_keywords:
             count = len(re.findall(r'\b' + re.escape(keyword) + r'\b', text_lower))
             if count > 0:
                 counts[keyword] = count
-        
-        # Count Tech keywords
+
         for keyword in self.TECH_KEYWORDS:
             count = len(re.findall(r'\b' + re.escape(keyword) + r'\b', text_lower))
             if count > 0:
                 counts[keyword] = count
-        
+
         return counts
     
     def get_keyword_summary(self, keyword_counts: Dict[str, int]) -> Dict[str, int]:
@@ -127,22 +129,41 @@ class SectionAnalyzer:
             "data_analytics": keyword_counts.get("data analytics", 0),
         }
     
-    def analyze_sections(self, sections: Dict[str, str], document_id: str, 
+    def _get_expanded_ai_keywords(self, ticker: str) -> List[str]:
+        """
+        Return AI_KEYWORDS expanded with company-specific terms from Groq.
+        Falls back to the base list if Groq is unavailable.
+        Results are cached inside groq_enrichment so Groq is called at most once
+        per (ticker, dimension) per process lifetime.
+        """
+        try:
+            from app.services.groq_enrichment import get_dimension_keywords
+            return get_dimension_keywords(
+                ticker, ticker, "sec_filing_ai_keywords", self.AI_KEYWORDS
+            )
+        except Exception as exc:
+            logger.warning("Groq SEC keyword expansion failed for %s: %s", ticker, exc)
+            return self.AI_KEYWORDS
+
+    def analyze_sections(self, sections: Dict[str, str], document_id: str,
                          ticker: str, filing_type: str, filing_date: str,
                          total_word_count: int) -> DocumentAnalysis:
         """Analyze all sections in a document"""
+        # Expand AI keywords with company-specific Groq terms once per call
+        ai_keywords = self._get_expanded_ai_keywords(ticker) if ticker else self.AI_KEYWORDS
+
         section_stats = []
         all_keywords = {}
-        
+
         for section_name, section_content in sections.items():
             if not section_content:
                 continue
-            
+
             # Word count
             word_count = len(section_content.split())
-            
-            # Keyword counts
-            keywords = self.count_keywords(section_content)
+
+            # Keyword counts (use expanded keywords)
+            keywords = self._count_keywords_with_list(section_content, ai_keywords)
             
             # Merge into total
             for kw, count in keywords.items():

@@ -86,6 +86,8 @@ class CultureSignal:
     source_breakdown: Dict[str, int] = field(default_factory=dict)
     positive_keywords_found: List[str] = field(default_factory=list)
     negative_keywords_found: List[str] = field(default_factory=list)
+    # "keyword_blend" = scored from real reviews | "groq_estimate" = no reviews, LLM-estimated | "no_data" = defaults
+    scoring_method: str = "no_data"
 
     def to_json(self, indent=2) -> str:
         d = asdict(self)
@@ -130,16 +132,45 @@ COMPANY_REGISTRY: Dict[str, Dict[str, Any]] = {
         "indeed_slugs": ["Dollar-General"],
         "careerbliss_slug": "dollar-general",
     },
+    "NFLX": {
+        "name": "Netflix", "sector": "Technology",
+        "glassdoor_id": "Netflix",
+        "indeed_slugs": ["Netflix"],
+        "careerbliss_slug": "netflix",
+    },
 }
 
 ALLOWED_TICKERS = set(COMPANY_REGISTRY.keys())
 VALID_SOURCES = {"glassdoor", "indeed", "careerbliss"}
 
 
+def _auto_register(ticker: str) -> None:
+    """
+    Dynamically add an unknown ticker to COMPANY_REGISTRY using
+    COMPANY_NAME_MAPPINGS (config.py) as the source of truth, with
+    simple heuristics as fallback.
+    """
+    from app.config import COMPANY_NAME_MAPPINGS
+    mapping = COMPANY_NAME_MAPPINGS.get(ticker, {})
+    name = mapping.get("search") or mapping.get("official") or ticker.capitalize()
+    # Derive slugs from name: "Netflix" → "Netflix", "JPMorgan Chase" → "JPMorgan-Chase"
+    slug = name.replace(" ", "-")
+    careerbliss = name.lower().replace(" ", "-")
+    COMPANY_REGISTRY[ticker] = {
+        "name": name,
+        "sector": "Unknown",
+        "glassdoor_id": slug,
+        "indeed_slugs": [slug],
+        "careerbliss_slug": careerbliss,
+    }
+    ALLOWED_TICKERS.add(ticker)
+    logger.info(f"[glassdoor_collector] Auto-registered ticker '{ticker}': name='{name}'")
+
+
 def validate_ticker(ticker: str) -> str:
     t = ticker.upper()
     if t not in ALLOWED_TICKERS:
-        raise ValueError(f"Unknown ticker '{t}'. Allowed: {', '.join(sorted(ALLOWED_TICKERS))}")
+        _auto_register(t)
     return t
 
 
@@ -474,8 +505,23 @@ class CultureCollector:
     # -----------------------------------------------------------------
     # Browser (Playwright) management
     # -----------------------------------------------------------------
+    def _check_playwright(self) -> bool:
+        """Return True if playwright + chromium are available, logging clearly if not."""
+        try:
+            import playwright  # noqa: F401
+            return True
+        except ImportError:
+            logger.error(
+                "Playwright is NOT installed in this environment. "
+                "Indeed and CareerBliss scraping will be skipped. "
+                "Run 'docker compose build --no-cache' to install it."
+            )
+            return False
+
     def _get_browser(self):
         if self._browser is None:
+            if not self._check_playwright():
+                raise RuntimeError("Playwright not installed — rebuild Docker image with 'docker compose build --no-cache'")
             from playwright.sync_api import sync_playwright
             self._playwright = sync_playwright().start()
             self._browser = self._playwright.chromium.launch(
@@ -555,6 +601,175 @@ class CultureCollector:
                 return False
         return True
 
+    def _groq_ai_keywords(self, ticker: str, company_name: str) -> List[str]:
+        """
+        Call Groq to generate AI-awareness keywords specific to this company.
+
+        Employees at different companies use different vocabulary to describe AI work.
+        Netflix employees say "recommendation engine", "personalization", "content algorithm"
+        rather than generic "machine learning". This method fetches those company-specific
+        terms so reviews are scored accurately even when generic keywords don't match.
+
+        Returns a deduplicated list of lowercase keyword strings (empty list on failure).
+        """
+        api_key = os.getenv("GROQ_API_KEY", "")
+        if not api_key:
+            logger.warning("[%s] GROQ_API_KEY not set — skipping AI keyword expansion", ticker)
+            return []
+
+        prompt = (
+            f'For the company "{company_name}" (ticker: {ticker}), list 15-20 specific words or '
+            f'short phrases that employees at this company would write in Glassdoor or Indeed reviews '
+            f'to signal that the company uses AI, machine learning, data science, or intelligent '
+            f'automation in its products or internal culture. '
+            f'Focus on vocabulary specific to this company\'s industry and well-known products — '
+            f'NOT generic AI terms like "artificial intelligence" or "machine learning" (those are '
+            f'already covered). '
+            f'For example, a streaming company might produce: '
+            f'["recommendation engine", "personalization", "content algorithm", "a/b testing at scale", '
+            f'"streaming analytics", "subscriber data", "taste preferences", "viewing history"]. '
+            f'Return ONLY a JSON array of lowercase strings, no explanation.'
+        )
+
+        try:
+            resp = httpx.post(
+                "https://api.groq.com/openai/v1/chat/completions",
+                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                json={
+                    "model": "llama-3.1-8b-instant",
+                    "messages": [
+                        {
+                            "role": "system",
+                            "content": (
+                                "You are an expert in company culture, employee reviews, and AI adoption. "
+                                "Respond only with a valid JSON array of strings."
+                            ),
+                        },
+                        {"role": "user", "content": prompt},
+                    ],
+                    "temperature": 0.3,
+                    "max_tokens": 400,
+                },
+                timeout=20.0,
+            )
+            resp.raise_for_status()
+            raw = resp.json()["choices"][0]["message"]["content"].strip()
+            # Strip markdown code fences if present
+            if raw.startswith("```"):
+                raw = raw.split("```")[1]
+                if raw.startswith("json"):
+                    raw = raw[4:]
+            keywords = json.loads(raw)
+            if isinstance(keywords, list):
+                result = [str(k).lower().strip() for k in keywords if k]
+                logger.info("[%s] Groq expanded AI keywords (%d terms): %s", ticker, len(result), result)
+                return result
+        except Exception as exc:
+            logger.warning("[%s] Groq AI keyword expansion failed: %s", ticker, exc)
+        return []
+
+    def _groq_estimate_culture_scores(self, ticker: str, company_name: str) -> Optional[CultureSignal]:
+        """
+        When 0 reviews are collected (scraping blocked / API quota exhausted),
+        ask Groq to estimate culture dimension scores from public knowledge.
+
+        Returns a CultureSignal with Groq-estimated scores and review_count=0,
+        or None if the API call fails so the caller can fall back to defaults.
+        """
+        api_key = os.getenv("GROQ_API_KEY", "")
+        if not api_key:
+            logger.warning("[%s] GROQ_API_KEY not set — cannot estimate culture scores", ticker)
+            return None
+
+        prompt = (
+            f'Based on public knowledge about the company "{company_name}" (ticker: {ticker}), '
+            f'estimate scores (0-100) for these culture dimensions as they would appear in '
+            f'employee reviews on Glassdoor/Indeed:\n'
+            f'- innovation_score: How innovative/cutting-edge is the culture? '
+            f'(100=highly innovative startup-like, 0=bureaucratic/stagnant)\n'
+            f'- data_driven_score: How data-driven/metrics-focused is the culture? '
+            f'(100=everything measured, 0=no data culture)\n'
+            f'- ai_awareness_score: How AI/ML-aware is the workforce and culture? '
+            f'(100=AI-first company, 0=no AI usage)\n'
+            f'- change_readiness_score: How change-ready/agile is the organization? '
+            f'(100=highly agile, 0=rigid/resistant)\n'
+            f'- avg_rating: Estimated Glassdoor avg star rating (1.0-5.0)\n\n'
+            f'Base estimates on well-known public information: industry, products, '
+            f'size, culture reputation, news coverage.\n'
+            f'Return ONLY a JSON object like: '
+            f'{{"innovation_score": 75, "data_driven_score": 80, "ai_awareness_score": 70, '
+            f'"change_readiness_score": 65, "avg_rating": 3.9}}'
+        )
+
+        try:
+            resp = httpx.post(
+                "https://api.groq.com/openai/v1/chat/completions",
+                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                json={
+                    "model": "llama-3.1-8b-instant",
+                    "messages": [
+                        {
+                            "role": "system",
+                            "content": (
+                                "You are a culture analyst with deep knowledge of public company "
+                                "reputations. Respond only with a valid JSON object, no explanation."
+                            ),
+                        },
+                        {"role": "user", "content": prompt},
+                    ],
+                    "temperature": 0.2,
+                    "max_tokens": 200,
+                },
+                timeout=20.0,
+            )
+            resp.raise_for_status()
+            raw = resp.json()["choices"][0]["message"]["content"].strip()
+            if raw.startswith("```"):
+                raw = raw.split("```")[1]
+                if raw.startswith("json"):
+                    raw = raw[4:]
+            data = json.loads(raw)
+
+            inn  = Decimal(str(max(0.0, min(100.0, float(data.get("innovation_score", 50))))))
+            dd   = Decimal(str(max(0.0, min(100.0, float(data.get("data_driven_score", 50))))))
+            ai_s = Decimal(str(max(0.0, min(100.0, float(data.get("ai_awareness_score", 50))))))
+            ch   = Decimal(str(max(0.0, min(100.0, float(data.get("change_readiness_score", 50))))))
+            avg_r = Decimal(str(max(1.0, min(5.0, float(data.get("avg_rating", 3.5))))))
+
+            overall = (
+                Decimal("0.30") * inn
+                + Decimal("0.25") * dd
+                + Decimal("0.25") * ai_s
+                + Decimal("0.20") * ch
+            ).quantize(Decimal("0.01"))
+
+            logger.info(
+                "[%s] Groq culture estimate: inn=%.1f dd=%.1f ai=%.1f ch=%.1f overall=%.1f",
+                ticker, float(inn), float(dd), float(ai_s), float(ch), float(overall),
+            )
+
+            return CultureSignal(
+                company_id=ticker,
+                ticker=ticker,
+                innovation_score=inn.quantize(Decimal("0.01")),
+                data_driven_score=dd.quantize(Decimal("0.01")),
+                change_readiness_score=ch.quantize(Decimal("0.01")),
+                ai_awareness_score=ai_s.quantize(Decimal("0.01")),
+                overall_score=overall,
+                review_count=0,
+                avg_rating=avg_r.quantize(Decimal("0.01")),
+                current_employee_ratio=Decimal("0.000"),
+                confidence=Decimal("0.300"),   # low confidence — no real reviews
+                source_breakdown={"groq_estimate": 1},
+                positive_keywords_found=[],
+                negative_keywords_found=[],
+                scoring_method="groq_estimate",
+            )
+
+        except Exception as exc:
+            logger.warning("[%s] Groq culture score estimation failed: %s", ticker, exc)
+            return None
+
     def _is_indeed_page_dump(self, review: CultureReview) -> bool:
         text = f"{review.pros} {review.cons}".lower()
         noise_count = sum(1 for ind in self.INDEED_NOISE_INDICATORS if ind in text)
@@ -633,15 +848,37 @@ class CultureCollector:
                 resp.raise_for_status()
                 raw_data = resp.json()
             except httpx.HTTPStatusError as e:
-                logger.error(f"[{ticker}][glassdoor] HTTP {e.response.status_code} on page {page_num}")
+                logger.error(
+                    f"[{ticker}][glassdoor] HTTP {e.response.status_code} on page {page_num} "
+                    f"— body: {e.response.text[:500]}"
+                )
                 break
             except Exception as e:
                 logger.error(f"[{ticker}][glassdoor] Request failed: {e}")
                 break
 
+            # Debug: log the top-level keys and structure on page 1 so we can
+            # diagnose API response shape mismatches without guessing.
+            if page_num == 1:
+                top_keys = list(raw_data.keys()) if isinstance(raw_data, dict) else type(raw_data).__name__
+                logger.info(f"[{ticker}][glassdoor] API response top-level keys: {top_keys}")
+                # If no 'data' key, try common alternative structures
+                if "data" not in raw_data:
+                    logger.warning(
+                        f"[{ticker}][glassdoor] Expected 'data' key not found. "
+                        f"Raw response (first 500 chars): {str(raw_data)[:500]}"
+                    )
+
             reviews_raw = raw_data.get("data", {}).get("reviews", [])
+            # Fallback: some RapidAPI endpoints return reviews at the top level
+            if not reviews_raw and isinstance(raw_data.get("reviews"), list):
+                reviews_raw = raw_data["reviews"]
+                logger.info(f"[{ticker}][glassdoor] Using top-level 'reviews' key (alternative response shape)")
             if not reviews_raw:
-                logger.info(f"[{ticker}][glassdoor] No more reviews at page {page_num}")
+                logger.info(
+                    f"[{ticker}][glassdoor] No reviews found at page {page_num}. "
+                    f"API response snippet: {str(raw_data)[:300]}"
+                )
                 break
 
             for r in reviews_raw:
@@ -720,13 +957,16 @@ class CultureCollector:
 
                     try:
                         page.wait_for_selector(
-                            '#cmp-container, [data-testid*="review"], .cmp-ReviewsList',
-                            timeout=10000,
+                            '#cmp-container, [data-testid*="review"], .cmp-ReviewsList, '
+                            '[data-tn-component="reviewsList"], div[itemprop="review"], '
+                            'article[itemprop="review"], [data-testid="review-card"]',
+                            timeout=15000,
                         )
                     except Exception:
-                        logger.info(f"[{ticker}][indeed] No review container on page {page_num + 1}")
-                        page.close()
-                        break
+                        logger.info(
+                            f"[{ticker}][indeed] No known review container on page {page_num + 1} "
+                            f"— attempting HTML parse anyway"
+                        )
 
                     for _ in range(3):
                         page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
@@ -737,9 +977,16 @@ class CultureCollector:
 
                     soup = BeautifulSoup(html, "html.parser")
 
+                    # Selector ladder: try progressively broader patterns
                     cards = soup.find_all("div", class_=re.compile(r"cmp-Review-container"))
                     if not cards:
                         cards = soup.find_all("div", attrs={"data-testid": re.compile(r"^review-\d+$")})
+                    if not cards:
+                        cards = soup.find_all(["div", "article"], attrs={"itemprop": "review"})
+                    if not cards:
+                        cards = soup.find_all("div", attrs={"data-tn-component": "review"})
+                    if not cards:
+                        cards = soup.find_all("div", attrs={"data-testid": "review-card"})
                     if not cards:
                         all_candidates = soup.find_all("div", class_=re.compile(r"cmp-Review(?!sList|s-|Rating)"))
                         cards = []
@@ -754,7 +1001,12 @@ class CultureCollector:
                             cards.append(c)
 
                     if not cards:
-                        logger.info(f"[{ticker}][indeed] No review cards found on page {page_num + 1} -> stopping")
+                        # Log HTML snippet to help diagnose selector drift
+                        snippet = html[:3000] if html else "(empty)"
+                        logger.warning(
+                            f"[{ticker}][indeed] No review cards found on page {page_num + 1} -> stopping. "
+                            f"HTML snippet (first 3000 chars):\n{snippet}"
+                        )
                         break
 
                     page_added = 0
@@ -1196,14 +1448,26 @@ class CultureCollector:
                 if source == "glassdoor":
                     revs = self.fetch_glassdoor(ticker, max_pages=max_pages_glassdoor)
                 elif source == "indeed":
+                    if not self._check_playwright():
+                        logger.error(
+                            f"[{ticker}][indeed] SKIPPED — Playwright not installed. "
+                            f"Rebuild Docker: 'docker compose build --no-cache'"
+                        )
+                        continue
                     revs = self.scrape_indeed(ticker, max_pages=max_pages_indeed)
                 elif source == "careerbliss":
+                    if not self._check_playwright():
+                        logger.error(
+                            f"[{ticker}][careerbliss] SKIPPED — Playwright not installed. "
+                            f"Rebuild Docker: 'docker compose build --no-cache'"
+                        )
+                        continue
                     revs = self.scrape_careerbliss(ticker, max_clicks=max_clicks_careerbliss)
                 else:
                     logger.warning(f"[{ticker}] Unknown source: {source}")
                     continue
             except Exception as e:
-                logger.error(f"[{ticker}][{source}] FAILED: {e}")
+                logger.error(f"[{ticker}][{source}] FAILED: {e}", exc_info=True)
 
             if revs:
                 self._save_cache(ticker, source, revs)
@@ -1234,7 +1498,12 @@ class CultureCollector:
         differentiates companies while preserving keyword signal.
         """
         if not reviews:
-            logger.warning(f"[{ticker}] No reviews to analyze")
+            logger.warning(f"[{ticker}] No reviews to analyze — attempting Groq culture estimate")
+            company_name = COMPANY_REGISTRY.get(ticker, {}).get("name", ticker)
+            groq_signal = self._groq_estimate_culture_scores(ticker, company_name)
+            if groq_signal:
+                return groq_signal
+            logger.warning(f"[{ticker}] Groq estimate also failed — returning hardcoded defaults")
             return CultureSignal(company_id=company_id, ticker=ticker)
 
         original_count = len(reviews)
@@ -1253,8 +1522,44 @@ class CultureCollector:
         logger.info(f"[{ticker}] Reviews after cleaning: {len(reviews)} (original {original_count})")
 
         if not reviews:
-            logger.warning(f"[{ticker}] No reviews remaining after cleaning")
+            logger.warning(f"[{ticker}] No reviews remaining after cleaning — attempting Groq culture estimate")
+            company_name = COMPANY_REGISTRY.get(ticker, {}).get("name", ticker)
+            groq_signal = self._groq_estimate_culture_scores(ticker, company_name)
+            if groq_signal:
+                return groq_signal
             return CultureSignal(company_id=company_id, ticker=ticker)
+
+        # ── Pre-Phase: Groq company-specific keyword expansion ────
+        # Expand all 6 culture keyword groups once per (ticker, dimension)
+        # so company-specific vocabulary (e.g. "content innovation" for Netflix,
+        # "disruption" for NVIDIA) is captured before scoring begins.
+        company_name = COMPANY_REGISTRY.get(ticker, {}).get("name", ticker)
+        try:
+            from app.services.groq_enrichment import get_dimension_keywords
+
+            def _expand(base_list: list, dimension: str) -> list:
+                return get_dimension_keywords(ticker, company_name, dimension, base_list)
+
+            inn_pos_kws  = _expand(list(self.INNOVATION_POSITIVE),  "innovation_positive_culture")
+            inn_neg_kws  = _expand(list(self.INNOVATION_NEGATIVE),  "innovation_negative_culture")
+            dd_kws       = _expand(list(self.DATA_DRIVEN_KEYWORDS), "data_driven_culture")
+            ai_kws       = _expand(list(self.AI_AWARENESS_KEYWORDS),"ai_awareness_culture")
+            ch_pos_kws   = _expand(list(self.CHANGE_POSITIVE),      "change_positive_culture")
+            ch_neg_kws   = _expand(list(self.CHANGE_NEGATIVE),      "change_negative_culture")
+            logger.info(
+                "[%s] Groq-expanded culture kws: inn_pos=%d inn_neg=%d dd=%d ai=%d ch_pos=%d ch_neg=%d",
+                ticker,
+                len(inn_pos_kws), len(inn_neg_kws), len(dd_kws),
+                len(ai_kws), len(ch_pos_kws), len(ch_neg_kws),
+            )
+        except Exception as exc:
+            logger.warning("[%s] Groq culture keyword expansion failed: %s — using base keywords", ticker, exc)
+            inn_pos_kws  = list(self.INNOVATION_POSITIVE)
+            inn_neg_kws  = list(self.INNOVATION_NEGATIVE)
+            dd_kws       = list(self.DATA_DRIVEN_KEYWORDS)
+            ai_kws       = list(self.AI_AWARENESS_KEYWORDS)
+            ch_pos_kws   = list(self.CHANGE_POSITIVE)
+            ch_neg_kws   = list(self.CHANGE_NEGATIVE)
 
         # ── Phase 1: Keyword counting ────────────────────────────
         inn_pos = inn_neg = Decimal("0")
@@ -1288,7 +1593,7 @@ class CultureCollector:
 
             # Innovation positive
             inn_pos_hit = False
-            for kw in self.INNOVATION_POSITIVE:
+            for kw in inn_pos_kws:
                 if self._keyword_in_text(kw, text):
                     if kw not in pos_kw:
                         pos_kw.append(kw)
@@ -1298,7 +1603,7 @@ class CultureCollector:
 
             # Innovation negative
             inn_neg_hit = False
-            for kw in self.INNOVATION_NEGATIVE:
+            for kw in inn_neg_kws:
                 if self._keyword_in_context(kw, text):
                     if kw not in neg_kw:
                         neg_kw.append(kw)
@@ -1308,7 +1613,7 @@ class CultureCollector:
 
             # Data-driven
             dd_hit = False
-            for kw in self.DATA_DRIVEN_KEYWORDS:
+            for kw in dd_kws:
                 if self._keyword_in_text(kw, text):
                     dd_hit = True
             if dd_hit:
@@ -1316,7 +1621,7 @@ class CultureCollector:
 
             # AI awareness
             ai_hit = False
-            for kw in self.AI_AWARENESS_KEYWORDS:
+            for kw in ai_kws:
                 if self._keyword_in_context(kw, text):
                     ai_hit = True
                 elif self._keyword_in_text(kw, job_title_lower):
@@ -1326,7 +1631,7 @@ class CultureCollector:
 
             # Change positive
             ch_pos_hit = False
-            for kw in self.CHANGE_POSITIVE:
+            for kw in ch_pos_kws:
                 if self._keyword_in_text(kw, text):
                     if kw not in pos_kw:
                         pos_kw.append(kw)
@@ -1336,7 +1641,7 @@ class CultureCollector:
 
             # Change negative
             ch_neg_hit = False
-            for kw in self.CHANGE_NEGATIVE:
+            for kw in ch_neg_kws:
                 if self._keyword_in_context(kw, text):
                     if kw not in neg_kw:
                         neg_kw.append(kw)
@@ -1385,6 +1690,33 @@ class CultureCollector:
         max(0.0, min(100.0, (avg_rating_val - 1.5) / 3.0 * 100.0))
 ))
 
+        # ── Groq fallback: expand AI keywords if none matched ────
+        # When kw_ai == 0, no generic AI keywords hit any review.
+        # This is common for companies like Netflix where employees write
+        # "recommendation engine" or "personalization" rather than "machine learning".
+        # We ask Groq for company-specific AI vocabulary and re-scan the reviews.
+        if kw_ai == Decimal("0") and total_w > 0:
+            groq_kws = self._groq_ai_keywords(ticker, company_name)
+            if groq_kws:
+                ai_m_groq = Decimal("0")
+                for r in reviews:
+                    r_text = f"{r.pros} {r.cons}".lower()
+                    if r.advice_to_management:
+                        r_text += f" {r.advice_to_management}".lower()
+                    r_job = r.job_title.lower() if r.job_title else ""
+                    days_old = (now - r.review_date).days if r.review_date else -1
+                    rec_w = Decimal("1.0") if days_old < 730 else Decimal("0.5")
+                    emp_w = Decimal("1.2") if r.is_current_employee else Decimal("1.0")
+                    src_w = self.SOURCE_RELIABILITY.get(r.source, Decimal("0.70"))
+                    r_w = rec_w * emp_w * src_w
+                    hit = any(kw in r_text or kw in r_job for kw in groq_kws)
+                    if hit:
+                        ai_m_groq += r_w
+                kw_ai = ai_m_groq / total_w * 100
+                logger.info(
+                    "[%s] Groq-expanded AI keyword score: kw_ai=%.2f (from %d extra terms)",
+                    ticker, float(kw_ai), len(groq_kws),
+                )
 
         # ── Phase 4: Blend 70% keyword + 30% rating ─────────────
         KW = self.KEYWORD_WEIGHT    # 0.70
@@ -1439,6 +1771,7 @@ class CultureCollector:
             source_breakdown=src_counts,
             positive_keywords_found=pos_kw,
             negative_keywords_found=neg_kw,
+            scoring_method="keyword_blend",
         )
 
     # -----------------------------------------------------------------

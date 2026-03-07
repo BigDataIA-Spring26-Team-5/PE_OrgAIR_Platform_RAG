@@ -122,6 +122,36 @@ class PatentSignalCollector:
             ]
 
     # ------------------------------------------------------------------
+    # Company-specific keyword expansion via Groq
+    # ------------------------------------------------------------------
+    def set_company_keywords(self, ticker: str, company_name: str) -> None:
+        """
+        Expand AI_PATENT_KEYWORDS with company-specific terms from Groq and
+        recompile self.keyword_patterns so classify_patent() uses them.
+        Called once per company in run_patent_signals() before classification.
+        """
+        try:
+            from app.services.groq_enrichment import get_dimension_keywords
+            expanded = get_dimension_keywords(
+                ticker, company_name, "ai_patents", self.AI_PATENT_KEYWORDS
+            )
+            self.keyword_patterns = {
+                kw: re.compile(r'\b' + re.escape(kw) + r'\b', re.IGNORECASE)
+                for kw in expanded
+            }
+            logger.info(
+                "  [%s] Patent keywords expanded: %d (was %d)",
+                ticker, len(expanded), len(self.AI_PATENT_KEYWORDS),
+            )
+        except Exception as exc:
+            logger.warning("  [%s] Groq patent keyword expansion failed: %s — using base keywords", ticker, exc)
+            # Reset to base patterns in case a previous company left expanded patterns
+            self.keyword_patterns = {
+                kw: re.compile(r'\b' + re.escape(kw) + r'\b', re.IGNORECASE)
+                for kw in self.AI_PATENT_KEYWORDS
+            }
+
+    # ------------------------------------------------------------------
     # Fetch patents from PatentsView API (single assignee name)
     # ------------------------------------------------------------------
     async def _fetch_patents_single(
@@ -400,7 +430,8 @@ async def run_patent_signals(
         if not patents:
             logger.warning(f"No patents found for {name}")
 
-        # Classify FIRST, then store
+        # Expand patent AI keywords with company-specific Groq terms, then classify
+        collector.set_company_keywords(ticker, name)
         classified = [collector.classify_patent(p) for p in patents]
         ai_count = len([p for p in classified if p.is_ai_related])
 

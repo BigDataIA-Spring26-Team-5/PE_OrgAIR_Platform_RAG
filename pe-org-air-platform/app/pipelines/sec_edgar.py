@@ -41,6 +41,27 @@ class SECEdgarCollector:
         "NVDA": "0001045810",
         "GE": "0000040545",
         "DG": "0000029534",
+        # Additional companies
+        "NFLX": "0001065280",
+        "AAPL": "0000320193",
+        "MSFT": "0000789019",
+        "GOOGL": "0001652044",
+        "AMZN": "0001018724",
+        "META": "0001326801",
+        "TSLA": "0001318605",
+        "ORCL": "0001341439",
+        "IBM": "0000051143",
+        "INTC": "0000050863",
+        "AMD": "0000002488",
+        "CRM": "0001108524",
+        "NOW": "0001373715",
+        "SNOW": "0001640147",
+        "UBER": "0001543151",
+        "LYFT": "0001759509",
+        "ABNB": "0001559720",
+        "COIN": "0001679788",
+        "PLTR": "0001321655",
+        "SHOP": "0001594805",
     }
     
     # Only the primary filing types (no amendments or supplemental)
@@ -84,19 +105,26 @@ class SECEdgarCollector:
             return None
 
     def get_cik(self, ticker: str) -> Optional[str]:
-        """Get CIK for a ticker"""
+        """Get CIK for a ticker. Checks hardcoded map first, then SEC company_tickers.json."""
         cik = self.TICKER_TO_CIK.get(ticker.upper())
         if cik:
             return cik
-        
-        # Try to look up CIK from SEC
-        logger.info(f"  🔍 Looking up CIK for {ticker}")
-        logger.info(f"  CIK lookup: {ticker} → {cik}") 
-        url = f"{self.SUBMISSIONS_URL}/CIK{ticker.upper()}.json"
-        response = self._make_request(url)
-        if response:
-            data = response.json()
-            return str(data.get("cik", "")).zfill(10)
+
+        # Dynamic lookup via SEC company_tickers.json
+        logger.info(f"  🔍 Looking up CIK for {ticker} via SEC EDGAR")
+        try:
+            url = f"{self.BASE_URL}/files/company_tickers.json"
+            response = self._make_request(url)
+            if response:
+                for entry in response.json().values():
+                    if entry.get("ticker", "").upper() == ticker.upper():
+                        cik_padded = str(entry["cik_str"]).zfill(10)
+                        self.TICKER_TO_CIK[ticker.upper()] = cik_padded  # cache it
+                        logger.info(f"  ✅ Found CIK for {ticker}: {cik_padded}")
+                        return cik_padded
+                logger.warning(f"  ⚠️  {ticker} not found in SEC company_tickers.json")
+        except Exception as e:
+            logger.error(f"  ❌ CIK lookup failed for {ticker}: {e}")
         return None
 
     def get_company_filings(
