@@ -32,10 +32,34 @@ CREATE TABLE IF NOT EXISTS companies (
     ticker VARCHAR(10),
     industry_id VARCHAR(36),
     position_factor DECIMAL(4,3) DEFAULT 0.0,
+    -- CS4: enriched fields (populated by Groq on create)
+    sector VARCHAR(100),
+    sub_sector VARCHAR(100),
+    market_cap_percentile DECIMAL(5,4),
+    revenue_millions FLOAT,
+    employee_count INTEGER,
+    fiscal_year_end VARCHAR(20),
     is_deleted BOOLEAN DEFAULT FALSE,
     created_at TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),
     updated_at TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),
     FOREIGN KEY (industry_id) REFERENCES industries(id)
+);
+
+-- Portfolio tables (CS4) — prefixed cs4_ to avoid conflicts with existing tables
+CREATE TABLE IF NOT EXISTS cs4_portfolios (
+    id VARCHAR(36) PRIMARY KEY,
+    name VARCHAR(255) NOT NULL,
+    fund_vintage INTEGER,
+    created_at TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP()
+);
+
+CREATE TABLE IF NOT EXISTS cs4_portfolio_companies (
+    portfolio_id VARCHAR(36) NOT NULL,
+    company_id VARCHAR(36) NOT NULL,
+    added_at TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),
+    PRIMARY KEY (portfolio_id, company_id),
+    FOREIGN KEY (portfolio_id) REFERENCES cs4_portfolios(id),
+    FOREIGN KEY (company_id) REFERENCES companies(id)
 );
 
 CREATE TABLE IF NOT EXISTS assessments (
@@ -107,10 +131,16 @@ $$;
 -- Validates: position_factor between -1.0 and 1.0
 -- =============================================================================
 
-CREATE OR REPLACE PROCEDURE insert_company(
+CREATE OR REPLACE PROCEDURE cs4_insert_company(
     p_name VARCHAR,
     p_ticker VARCHAR,
-    p_industry_id VARCHAR
+    p_industry_id VARCHAR,
+    p_sector VARCHAR DEFAULT NULL,
+    p_sub_sector VARCHAR DEFAULT NULL,
+    p_market_cap_percentile FLOAT DEFAULT NULL,
+    p_revenue_millions FLOAT DEFAULT NULL,
+    p_employee_count INTEGER DEFAULT NULL,
+    p_fiscal_year_end VARCHAR DEFAULT NULL
 )
 RETURNS VARCHAR
 LANGUAGE SQL
@@ -125,13 +155,25 @@ BEGIN
         id,
         name,
         ticker,
-        industry_id
+        industry_id,
+        sector,
+        sub_sector,
+        market_cap_percentile,
+        revenue_millions,
+        employee_count,
+        fiscal_year_end
     )
     VALUES (
         :v_id,
         :p_name,
         :p_ticker,
-        :p_industry_id
+        :p_industry_id,
+        :p_sector,
+        :p_sub_sector,
+        :p_market_cap_percentile,
+        :p_revenue_millions,
+        :p_employee_count,
+        :p_fiscal_year_end
     );
 
     RETURN 'SUCCESS: Company inserted with id = ' || v_id;
