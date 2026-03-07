@@ -17,35 +17,128 @@ from app.routers.documents import router as documents_router
 from app.routers.signals import router as signals_router
 from app.routers.evidence import router as evidence_router
 from app.routers.scoring import router as scoring_router
-# from app.routers.board_governance import router as board_governance_router  # Not needed: CS4 reads board data via scoring router (S3)
-# from app.routers.glassdoor_signals import router as glassdoor_signals_router  # Not needed: CS4 reads culture data via scoring router (S3)
+from app.routers.board_governance import router as board_governance_router
+from app.routers.glassdoor_signals import router as glassdoor_signals_router
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.shutdown import set_shutdown, is_shutting_down
 
 
-# SWAGGER UI — tag display order
+# SWAGGER UI — tag display order (CS1 → CS2 → CS3)
 _OPENAPI_TAGS = [
+    # ── Infrastructure ────────────────────────────────────────────
     {"name": "Root"},
     {"name": "Health"},
-    # CS1 — Company metadata
-    {"name": "Companies"},
-    # CS2 — Evidence collection
-    {"name": "1. Collection"},
-    {"name": "2. Parsing"},
-    {"name": "3. Chunking"},
-    {"name": "5. Management"},
-    {"name": "6. Reset (Demo)"},
-    {"name": "Signals"},
-    {"name": "Evidence"},
-    # CS3 — Scoring & assessments
-    {"name": "Assessments"},
-    {"name": "Dimension Scores"},
-    {"name": "CS3 Dimensions Scoring"},
-    # Commented out — not needed for CS4
-    # {"name": "Industries"},
-    # {"name": "Glassdoor Culture Signals"},
-    # {"name": "Board Governance"},
+
+    # ── CS1 — Company Metadata ────────────────────────────────────
+    {
+        "name": "Companies",
+        "description": (
+            "**CS1 — Company Metadata**  \n"
+            "CRUD for companies. Creating a company triggers background Groq enrichment "
+            "(sector, revenue, employee count, fiscal year end). "
+            "`GET /{ticker}/dimension-keywords` returns Groq-expanded rubric keywords per dimension."
+        ),
+    },
+
+    # ── CS2 — Evidence Collection ─────────────────────────────────
+    {
+        "name": "1. Collection",
+        "description": (
+            "**CS2 — SEC EDGAR Document Collection**  \n"
+            "Download 10-K, 10-Q, 8-K, DEF 14A from SEC EDGAR → S3 raw files → Snowflake metadata."
+        ),
+    },
+    {
+        "name": "2. Parsing",
+        "description": (
+            "**CS2 — Document Parsing**  \n"
+            "Extract text/tables from raw SEC filings, identify key sections (Risk Factors, MD&A), "
+            "upload parsed JSON to S3."
+        ),
+    },
+    {
+        "name": "3. Chunking",
+        "description": (
+            "**CS2 — Document Chunking**  \n"
+            "Split parsed documents into overlapping chunks for LLM processing → S3 + Snowflake."
+        ),
+    },
+    {
+        "name": "5. Management",
+        "description": (
+            "**CS2 — Document Management & Reports**  \n"
+            "List, inspect, and report on collected/parsed/chunked documents."
+        ),
+    },
+    {
+        "name": "6. Reset (Demo)",
+        "description": (
+            "**CS2 — Reset (Demo Only)**  \n"
+            "Delete all S3 and Snowflake data for a company. For testing only."
+        ),
+    },
+    {
+        "name": "Signals",
+        "description": (
+            "**CS2 — Signal Scoring (4 Evidence Signals)**  \n"
+            "Score per company: `technology_hiring` (JobSpy), `digital_presence` (BuiltWith+Wappalyzer), "
+            "`innovation_activity` (PatentsView/USPTO), `leadership_signals` (SEC DEF-14A).  \n"
+            "Also: `GET /{ticker}/current-scores` to read latest scores without re-running."
+        ),
+    },
+    {
+        "name": "Glassdoor Culture Signals",
+        "description": (
+            "**CS2 — Culture Signal Collection**  \n"
+            "Scrape Glassdoor/Indeed/CareerBliss → CultureSignal (innovation, data-driven, "
+            "AI awareness, change readiness) → S3 + Snowflake. Works for any registered ticker."
+        ),
+    },
+    {
+        "name": "Board Governance",
+        "description": (
+            "**CS2 — Board Governance Signal**  \n"
+            "Parse DEF 14A proxy → board composition, tech committee, AI expertise, "
+            "independent director ratio → governance score. Dynamic CIK lookup for any SEC ticker."
+        ),
+    },
+    {
+        "name": "Evidence",
+        "description": (
+            "**CS2 — Evidence Summary & Backfill**  \n"
+            "Aggregate evidence stats across all companies; trigger full evidence backfill "
+            "(SEC docs + 4 signals) for the entire portfolio."
+        ),
+    },
+
+    # ── CS3 — Scoring & Assessments ───────────────────────────────
+    {
+        "name": "Assessments",
+        "description": (
+            "**CS3 — Assessment CRUD**  \n"
+            "Create and manage IC assessments. "
+            "Status: `draft` → `in_progress` → `submitted` → `approved` → `superseded`."
+        ),
+    },
+    {
+        "name": "Dimension Scores",
+        "description": (
+            "**CS3 — Dimension Score CRUD**  \n"
+            "Add/retrieve/update individual scores for the 7 V^R dimensions: "
+            "data_infrastructure, ai_governance, technology_stack, talent, "
+            "leadership, use_case_portfolio, culture."
+        ),
+    },
+    {
+        "name": "CS3 Dimensions Scoring",
+        "description": (
+            "**CS3 — Full Scoring Pipeline**  \n"
+            "CS2 signals → rubric-score SEC sections → map evidence to 7 dimensions (Table 1 matrix) "
+            "→ persist to Snowflake.  \n"
+            "**Prerequisite:** run CS2 signal scoring first."
+        ),
+    },
 ]
 
 # FASTAPI APPLICATION CONFIGURATION
@@ -82,10 +175,11 @@ app.include_router(assessments_router)       # full company assessment
 app.include_router(dimension_scores_router)  # per-dimension scores + confidence intervals
 app.include_router(scoring_router)           # dimension scoring computation + rubrics
 
-# COMMENTED OUT — not needed for CS4:
+app.include_router(board_governance_router)  # board composition + governance scoring
+app.include_router(glassdoor_signals_router) # culture signal collection + scoring
+
+# COMMENTED OUT — not needed:
 # app.include_router(industries_router)        # static catalog, not used by CS4 clients
-# app.include_router(board_governance_router)  # data collection trigger; CS4 reads via scoring router (S3)
-# app.include_router(glassdoor_signals_router) # data collection trigger; CS4 reads via scoring router (S3)
 # tc_vr_router, pf_router, hr_router, orgair_router, property_tests_router
 
 

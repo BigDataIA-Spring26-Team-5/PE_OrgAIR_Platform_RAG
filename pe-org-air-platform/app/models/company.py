@@ -35,6 +35,34 @@ class CompanyBase(BaseModel):
         description="Adjustment factor between -1.0 and 1.0"
     )
 
+    # CS4 enriched fields (populated by Groq on company creation)
+    sector: Optional[str] = Field(
+        default=None,
+        description="High-level sector (e.g. technology, retail)"
+    )
+    sub_sector: Optional[str] = Field(
+        default=None,
+        description="Sub-sector within the sector"
+    )
+    market_cap_percentile: Optional[float] = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description="Market cap percentile within sector peers (0-1)"
+    )
+    revenue_millions: Optional[float] = Field(
+        default=None,
+        description="Annual revenue in USD millions"
+    )
+    employee_count: Optional[int] = Field(
+        default=None,
+        description="Total headcount"
+    )
+    fiscal_year_end: Optional[str] = Field(
+        default=None,
+        description="Month of fiscal year end (e.g. December, March)"
+    )
+
     @field_validator("ticker_symbol")
     @classmethod
     def uppercase_ticker(cls, value: Optional[str]) -> Optional[str]:
@@ -89,3 +117,11 @@ class PaginatedCompanyResponse(BaseModel):
     page: int
     page_size: int
     total_pages: int
+
+
+class PortfolioResponse(BaseModel):
+    """Response model for a PE portfolio."""
+    portfolio_id: str
+    name: str
+    fund_vintage: Optional[int] = None
+    company_ids: List[str] = Field(default_factory=list)
