@@ -12,20 +12,18 @@ class CompanyRepository(BaseRepository):
     """
 
 
+    _COLS = (
+        "id, name, ticker, industry_id, position_factor, "
+        "sector, sub_sector, market_cap_percentile, revenue_millions, "
+        "employee_count, fiscal_year_end, is_deleted, created_at, updated_at"
+    )
+
     def get_all(self) -> List[Dict]:
         """
         Return all active (non-deleted) companies.
         """
-        sql = """
-        SELECT
-            id,
-            name,
-            ticker,
-            industry_id,
-            position_factor,
-            is_deleted,
-            created_at,
-            updated_at
+        sql = f"""
+        SELECT {self._COLS}
         FROM companies
         WHERE is_deleted = FALSE
         ORDER BY name
@@ -44,16 +42,8 @@ class CompanyRepository(BaseRepository):
         """
         Fetch a single company by ID.
         """
-        sql = """
-        SELECT
-            id,
-            name,
-            ticker,
-            industry_id,
-            position_factor,
-            is_deleted,
-            created_at,
-            updated_at
+        sql = f"""
+        SELECT {self._COLS}
         FROM companies
         WHERE id = %s AND is_deleted = FALSE
         """
@@ -74,16 +64,8 @@ class CompanyRepository(BaseRepository):
         """
         Fetch a single company by ticker.
         """
-        sql = """
-        SELECT
-            id,
-            name,
-            ticker,
-            industry_id,
-            position_factor,
-            is_deleted,
-            created_at,
-            updated_at
+        sql = f"""
+        SELECT {self._COLS}
         FROM companies
         WHERE UPPER(ticker) = UPPER(%s) AND is_deleted = FALSE
         """
@@ -104,16 +86,8 @@ class CompanyRepository(BaseRepository):
         """
         Return all active companies for a specific industry.
         """
-        sql = """
-        SELECT
-            id,
-            name,
-            ticker,
-            industry_id,
-            position_factor,
-            is_deleted,
-            created_at,
-            updated_at
+        sql = f"""
+        SELECT {self._COLS}
         FROM companies
         WHERE industry_id = %s AND is_deleted = FALSE
         ORDER BY name
@@ -191,6 +165,12 @@ class CompanyRepository(BaseRepository):
         industry_id: UUID,
         ticker: Optional[str] = None,
         position_factor: float = 0.0,
+        sector: Optional[str] = None,
+        sub_sector: Optional[str] = None,
+        market_cap_percentile: Optional[float] = None,
+        revenue_millions: Optional[float] = None,
+        employee_count: Optional[int] = None,
+        fiscal_year_end: Optional[str] = None,
     ) -> Dict:
         """
         Create a new company and return its data.
@@ -198,19 +178,122 @@ class CompanyRepository(BaseRepository):
         company_id = str(uuid4())
 
         sql = """
-        INSERT INTO companies (id, name, ticker, industry_id, position_factor)
-        VALUES (%s, %s, %s, %s, %s)
+        INSERT INTO companies (
+            id, name, ticker, industry_id, position_factor,
+            sector, sub_sector, market_cap_percentile,
+            revenue_millions, employee_count, fiscal_year_end
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """
 
         with self.get_connection() as conn:
             cur = conn.cursor()
             try:
-                cur.execute(sql, (company_id, name, ticker, str(industry_id), position_factor))
+                cur.execute(sql, (
+                    company_id, name, ticker, str(industry_id), position_factor,
+                    sector, sub_sector, market_cap_percentile,
+                    revenue_millions, employee_count, fiscal_year_end,
+                ))
                 conn.commit()
             finally:
                 cur.close()
 
         return self.get_by_id(UUID(company_id))
+
+    def update_enriched_fields(
+        self,
+        company_id: UUID,
+        sector: Optional[str] = None,
+        sub_sector: Optional[str] = None,
+        market_cap_percentile: Optional[float] = None,
+        revenue_millions: Optional[float] = None,
+        employee_count: Optional[int] = None,
+        fiscal_year_end: Optional[str] = None,
+    ) -> None:
+        """Update only the Groq-enriched fields for a company."""
+        updates, params = [], []
+        if sector is not None:
+            updates.append("sector = %s"); params.append(sector)
+        if sub_sector is not None:
+            updates.append("sub_sector = %s"); params.append(sub_sector)
+        if market_cap_percentile is not None:
+            updates.append("market_cap_percentile = %s"); params.append(market_cap_percentile)
+        if revenue_millions is not None:
+            updates.append("revenue_millions = %s"); params.append(revenue_millions)
+        if employee_count is not None:
+            updates.append("employee_count = %s"); params.append(employee_count)
+        if fiscal_year_end is not None:
+            updates.append("fiscal_year_end = %s"); params.append(fiscal_year_end)
+        if not updates:
+            return
+        updates.append("updated_at = CURRENT_TIMESTAMP()")
+        params.append(str(company_id))
+        sql = f"UPDATE companies SET {', '.join(updates)} WHERE id = %s"
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            try:
+                cur.execute(sql, tuple(params))
+                conn.commit()
+            finally:
+                cur.close()
+
+    def get_by_portfolio(self, portfolio_id: str) -> List[Dict]:
+        """Return all active companies belonging to a portfolio."""
+        sql = f"""
+        SELECT {self._COLS}
+        FROM companies
+        WHERE id IN (
+            SELECT company_id FROM cs4_portfolio_companies WHERE portfolio_id = %s
+        ) AND is_deleted = FALSE
+        ORDER BY name
+        """
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            try:
+                cur.execute(sql, (portfolio_id,))
+                columns = [col[0].lower() for col in cur.description]
+                return [dict(zip(columns, row)) for row in cur.fetchall()]
+            finally:
+                cur.close()
+
+    def create_portfolio(self, name: str, fund_vintage: Optional[int] = None) -> str:
+        """Create a new portfolio in cs4_portfolios and return its UUID."""
+        portfolio_id = str(uuid4())
+        sql = "INSERT INTO cs4_portfolios (id, name, fund_vintage) VALUES (%s, %s, %s)"
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            try:
+                cur.execute(sql, (portfolio_id, name, fund_vintage))
+                conn.commit()
+            finally:
+                cur.close()
+        return portfolio_id
+
+    def add_company_to_portfolio(self, portfolio_id: str, company_id: str) -> None:
+        """Link a company to a portfolio in cs4_portfolio_companies."""
+        sql = "INSERT INTO cs4_portfolio_companies (portfolio_id, company_id) VALUES (%s, %s)"
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            try:
+                cur.execute(sql, (portfolio_id, company_id))
+                conn.commit()
+            finally:
+                cur.close()
+
+    def get_portfolio(self, portfolio_id: str) -> Optional[Dict]:
+        """Fetch portfolio metadata by ID."""
+        sql = "SELECT id, name, fund_vintage, created_at FROM cs4_portfolios WHERE id = %s"
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            try:
+                cur.execute(sql, (portfolio_id,))
+                row = cur.fetchone()
+                if not row:
+                    return None
+                columns = [col[0].lower() for col in cur.description]
+                return dict(zip(columns, row))
+            finally:
+                cur.close()
 
     def update(
         self,
@@ -219,6 +302,12 @@ class CompanyRepository(BaseRepository):
         ticker: Optional[str] = None,
         industry_id: Optional[UUID] = None,
         position_factor: Optional[float] = None,
+        sector: Optional[str] = None,
+        sub_sector: Optional[str] = None,
+        market_cap_percentile: Optional[float] = None,
+        revenue_millions: Optional[float] = None,
+        employee_count: Optional[int] = None,
+        fiscal_year_end: Optional[str] = None,
     ) -> Dict:
         """
         Update a company's fields and return updated data.
@@ -238,6 +327,24 @@ class CompanyRepository(BaseRepository):
         if position_factor is not None:
             updates.append("position_factor = %s")
             params.append(position_factor)
+        if sector is not None:
+            updates.append("sector = %s")
+            params.append(sector)
+        if sub_sector is not None:
+            updates.append("sub_sector = %s")
+            params.append(sub_sector)
+        if market_cap_percentile is not None:
+            updates.append("market_cap_percentile = %s")
+            params.append(market_cap_percentile)
+        if revenue_millions is not None:
+            updates.append("revenue_millions = %s")
+            params.append(revenue_millions)
+        if employee_count is not None:
+            updates.append("employee_count = %s")
+            params.append(employee_count)
+        if fiscal_year_end is not None:
+            updates.append("fiscal_year_end = %s")
+            params.append(fiscal_year_end)
 
         if not updates:
             return self.get_by_id(company_id)
