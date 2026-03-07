@@ -56,6 +56,7 @@ lxml
 python-Wappalyzer
 python-jobspy>=1.1.0
 rapidfuzz
+playwright>=1.40.0
 
 # PDF Generation
 weasyprint>=60.0
