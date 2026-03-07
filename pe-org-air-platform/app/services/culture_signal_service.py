@@ -8,6 +8,7 @@ formats the response.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from dataclasses import dataclass, asdict
@@ -46,7 +47,7 @@ class CultureSignalService:
     # Public API
     # ------------------------------------------------------------------
 
-    def collect(self, ticker: str) -> CultureCollectResult:
+    async def collect(self, ticker: str) -> CultureCollectResult:
         """
         Run the full CultureCollector pipeline for *ticker*:
           1. Scrape reviews from Glassdoor, Indeed, and CareerBliss
@@ -58,15 +59,20 @@ class CultureSignalService:
         from app.pipelines.glassdoor_collector import CultureCollector
 
         ticker = ticker.upper()
-        collector = CultureCollector()
-        try:
-            signal = collector.collect_and_analyze(
-                ticker=ticker,
-                sources=["glassdoor", "indeed", "careerbliss"],
-                use_cache=True,
-            )
-        finally:
-            collector.close_browser()
+
+        def _run_collection():
+            """Run blocking Playwright-based collection in a thread (outside asyncio loop)."""
+            collector = CultureCollector()
+            try:
+                return collector.collect_and_analyze(
+                    ticker=ticker,
+                    sources=["glassdoor", "indeed", "careerbliss"],
+                    use_cache=True,
+                )
+            finally:
+                collector.close_browser()
+
+        signal = await asyncio.to_thread(_run_collection)
 
         # Convert Decimal values to float for JSON serialisation
         signal_dict: dict = {}

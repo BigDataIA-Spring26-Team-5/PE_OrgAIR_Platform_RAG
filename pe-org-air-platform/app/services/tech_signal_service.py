@@ -38,6 +38,7 @@ class TechSignalService(BaseSignalService):
         result: TechStackResult = await self.collector.analyze_company(
             company_id=company_id,
             ticker=ticker,
+            company_name=company.get("name"),
         )
         self._store_to_s3(ticker, result)
 

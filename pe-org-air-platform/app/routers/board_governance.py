@@ -7,12 +7,14 @@ from __future__ import annotations
 import logging
 from typing import List, Optional
 
+import httpx
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from app.pipelines.board_analyzer import (
     CompanyRegistry,
     GovernanceSignal,
+    SEC_HEADERS,
 )
 from app.services.board_governance_service import get_board_governance_service
 
@@ -62,6 +64,45 @@ class BatchOut(BaseModel):
 
 
 # ────────────────────────────────────────────────────────────────
+# Dynamic ticker registration (allows any SEC-registered company)
+# ────────────────────────────────────────────────────────────────
+
+def _ensure_registered(ticker: str) -> None:
+    """
+    Ensure ticker is in CompanyRegistry. If not, look up its CIK from SEC
+    EDGAR's company_tickers.json and register it dynamically.
+    Falls back silently — board analyzer will still try S3 for parsed DEF 14A.
+    """
+    ticker = ticker.upper()
+    try:
+        CompanyRegistry.get(ticker)
+        return  # already registered
+    except ValueError:
+        pass
+
+    try:
+        resp = httpx.get(
+            "https://www.sec.gov/files/company_tickers.json",
+            headers=SEC_HEADERS,
+            timeout=10.0,
+        )
+        resp.raise_for_status()
+        for entry in resp.json().values():
+            if entry.get("ticker", "").upper() == ticker:
+                cik_padded = str(entry["cik_str"]).zfill(10)
+                CompanyRegistry.register(
+                    ticker=ticker,
+                    cik=cik_padded,
+                    name=entry.get("title", ticker),
+                )
+                logger.info(f"[{ticker}] Dynamically registered: CIK={cik_padded}")
+                return
+        logger.warning(f"[{ticker}] Not found in SEC company tickers — will rely on S3 data")
+    except Exception as e:
+        logger.warning(f"[{ticker}] CIK lookup failed: {e} — will rely on S3 data")
+
+
+# ────────────────────────────────────────────────────────────────
 # Helpers
 # ────────────────────────────────────────────────────────────────
 
@@ -105,10 +146,7 @@ def _to_response(
 async def analyze_ticker(ticker: str):
     """Analyze board governance for a single company and persist results."""
     ticker = ticker.upper()
-    try:
-        CompanyRegistry.get(ticker)
-    except ValueError:
-        raise HTTPException(404, f"Ticker '{ticker}' not registered. Available: {CompanyRegistry.all_tickers()}")
+    _ensure_registered(ticker)
 
     try:
         signal, trail, s3_key = get_board_governance_service().analyze(ticker)
@@ -161,10 +199,7 @@ async def get_governance_score(ticker: str):
     Tries S3 first (most recent stored result). Falls back to live analysis.
     """
     ticker = ticker.upper()
-    try:
-        CompanyRegistry.get(ticker)
-    except ValueError:
-        raise HTTPException(404, f"Ticker '{ticker}' not registered")
+    _ensure_registered(ticker)
 
     svc = get_board_governance_service()
 

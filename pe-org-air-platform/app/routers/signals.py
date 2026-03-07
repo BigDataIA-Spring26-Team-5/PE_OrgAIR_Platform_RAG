@@ -367,7 +367,7 @@ async def run_signal_collection(
     }
 
     category_handlers = {
-        "technology_hiring": lambda: get_job_data_service().analyze_company(ticker, force_refresh=force_refresh),
+        "technology_hiring": lambda: get_job_signal_service().analyze_company(ticker, force_refresh=force_refresh),
         "innovation_activity": lambda: get_patent_signal_service().analyze_company(ticker, years_back=years_back),
         "digital_presence": lambda: get_tech_signal_service().analyze_company(ticker, force_refresh=force_refresh),
         "leadership_signals": lambda: get_leadership_service().analyze_company(ticker),

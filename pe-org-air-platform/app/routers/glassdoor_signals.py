@@ -61,7 +61,7 @@ class CollectCultureResponse(BaseModel):
     s3_raw_key: Optional[str] = None
     s3_output_key: Optional[str] = None
     snowflake_upserted: bool = False
-    culture_scores: Optional[Dict[str, float]] = None
+    culture_scores: Optional[Dict[str, Any]] = None
     raw_reviews: List[ReviewOut] = Field(default_factory=list)
     duration_seconds: Optional[float] = None
     error: Optional[str] = None
@@ -83,6 +83,14 @@ class CultureSignalDetailOut(BaseModel):
     source_breakdown: Optional[Dict[str, int]] = None
     positive_keywords_found: Optional[List[str]] = None
     negative_keywords_found: Optional[List[str]] = None
+    scoring_method: Optional[str] = Field(
+        default=None,
+        description=(
+            "'keyword_blend' = scored from real employee reviews | "
+            "'groq_estimate' = no reviews collected, scores estimated by Groq LLM from public knowledge | "
+            "'no_data' = hardcoded defaults, no data available"
+        ),
+    )
     run_timestamp: Optional[str] = None
     s3_source: Optional[str] = None
 
@@ -122,18 +130,12 @@ async def collect_culture_signal(ticker: str):
     start = time.time()
     ticker = ticker.upper()
 
-    if ticker not in CS3_PORTFOLIO:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid ticker '{ticker}'. Must be one of: {', '.join(CS3_PORTFOLIO)}",
-        )
-
     try:
         logger.info("=" * 60)
         logger.info("GLASSDOOR COLLECTION: %s", ticker)
         logger.info("=" * 60)
 
-        result: CultureCollectResult = get_culture_signal_service().collect(ticker)
+        result: CultureCollectResult = await get_culture_signal_service().collect(ticker)
 
         raw_reviews = [
             ReviewOut(
@@ -166,6 +168,7 @@ async def collect_culture_signal(ticker: str):
                 "data_driven_score": result.signal_dict.get("data_driven_score"),
                 "ai_awareness_score": result.signal_dict.get("ai_awareness_score"),
                 "change_readiness_score": result.signal_dict.get("change_readiness_score"),
+                "scoring_method": result.signal_dict.get("scoring_method", "no_data"),
             },
             raw_reviews=raw_reviews,
             duration_seconds=round(time.time() - start, 2),
@@ -223,6 +226,7 @@ async def get_culture_signal(ticker: str):
         source_breakdown=data.get("source_breakdown"),
         positive_keywords_found=data.get("positive_keywords_found"),
         negative_keywords_found=data.get("negative_keywords_found"),
+        scoring_method=data.get("scoring_method"),
         run_timestamp=data.get("run_timestamp"),
         s3_source=s3_key,
     )
