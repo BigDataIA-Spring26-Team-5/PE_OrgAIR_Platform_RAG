@@ -75,11 +75,11 @@ class JustificationGenerator:
         self.router = router or ModelRouter()
 
     def generate_justification(
-        self, company_id: str, dimension: str
+        self, ticker: str, dimension: str
     ) -> ScoreJustification:
         """Full pipeline: fetch score → retrieve evidence → generate summary."""
         # Step 1: Fetch CS3 dimension score
-        dim_score = self.cs3.get_dimension_score(company_id, dimension)
+        dim_score = self.cs3.get_dimension_score(ticker, dimension)
         if dim_score is None:
             dim_score = DimensionScore(
                 dimension=dimension, score=50.0, level=3, level_name="Adequate"
@@ -94,7 +94,7 @@ class JustificationGenerator:
         query = f"{dimension} " + " ".join(rubric_keywords[:5])
 
         # Step 4: Retrieve evidence
-        filter_meta: Dict[str, Any] = {"company_id": company_id}
+        filter_meta: Dict[str, Any] = {"ticker": ticker}
         if dimension:
             filter_meta["dimension"] = dimension
         raw_results = self.retriever.retrieve(query, k=15, filter_metadata=filter_meta)
@@ -115,7 +115,7 @@ class JustificationGenerator:
         gaps_text = "\n".join(f"- {g}" for g in gaps) or "None identified."
 
         prompt = JUSTIFICATION_PROMPT.format(
-            company_id=company_id,
+            company_id=ticker,
             dimension=dimension,
             score=dim_score.score,
             level=dim_score.level,
@@ -138,7 +138,7 @@ class JustificationGenerator:
             summary = f"[Summary generation unavailable: {e}]"
 
         return ScoreJustification(
-            company_id=company_id,
+            company_id=ticker,
             dimension=dimension,
             score=dim_score.score,
             level=dim_score.level,

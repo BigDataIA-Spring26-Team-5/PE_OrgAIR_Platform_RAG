@@ -77,7 +77,7 @@ class VectorStore:
             primary_dim = dimension_mapper.get_primary_dimension(ev.signal_category)
 
             meta = {
-                "company_id": ev.company_id,
+                "ticker": ev.company_id,
                 "source_type": ev.source_type,
                 "signal_category": ev.signal_category,
                 "dimension": primary_dim,
@@ -109,7 +109,7 @@ class VectorStore:
         self,
         query: str,
         top_k: int = 10,
-        company_id: Optional[str] = None,
+        ticker: Optional[str] = None,
         dimension: Optional[str] = None,
         source_types: Optional[List[str]] = None,
         min_confidence: float = 0.0,
@@ -120,8 +120,8 @@ class VectorStore:
 
         where: Dict[str, Any] = {}
         conditions = []
-        if company_id:
-            conditions.append({"company_id": {"$eq": company_id}})
+        if ticker:
+            conditions.append({"ticker": {"$eq": ticker}})
         if dimension:
             conditions.append({"dimension": {"$eq": dimension}})
         if source_types:

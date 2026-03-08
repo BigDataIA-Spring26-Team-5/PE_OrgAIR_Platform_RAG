@@ -56,7 +56,7 @@ def _get_mapper() -> DimensionMapper:
 # ── Request / Response Models ─────────────────────────────────────────────────
 
 class IndexRequest(BaseModel):
-    company_id: str
+    ticker: str
     source_types: Optional[List[str]] = None
     signal_categories: Optional[List[str]] = None
     min_confidence: float = 0.0
@@ -64,12 +64,12 @@ class IndexRequest(BaseModel):
 
 class IndexResponse(BaseModel):
     indexed_count: int
-    company_id: str
+    ticker: str
 
 
 class SearchRequest(BaseModel):
     query: str
-    company_id: Optional[str] = None
+    ticker: Optional[str] = None
     dimension: Optional[str] = None
     top_k: int = 10
     use_hyde: bool = False
@@ -84,7 +84,7 @@ class SearchResult(BaseModel):
 
 
 class JustifyResponse(BaseModel):
-    company_id: str
+    ticker: str
     dimension: str
     score: float
     level: int
@@ -110,9 +110,9 @@ class ICPrepResponse(BaseModel):
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
-@router.post("/index/{company_id}", response_model=IndexResponse, summary="Index company evidence into ChromaDB")
+@router.post("/index/{ticker}", response_model=IndexResponse, summary="Index company evidence into ChromaDB")
 async def index_company_evidence(
-    company_id: str,
+    ticker: str,
     req: Optional[IndexRequest] = None,
 ):
     """Fetch CS2 evidence for a company and index into ChromaDB."""
@@ -121,7 +121,7 @@ async def index_company_evidence(
     mapper = _get_mapper()
 
     evidence = cs2.get_evidence(
-        company_id=company_id,
+        ticker=ticker,
         source_types=req.source_types if req else None,
         signal_categories=req.signal_categories if req else None,
         min_confidence=req.min_confidence if req else 0.0,
@@ -129,7 +129,7 @@ async def index_company_evidence(
     count = vs.index_cs2_evidence(evidence, mapper)
     if evidence:
         cs2.mark_indexed([e.evidence_id for e in evidence])
-    return IndexResponse(indexed_count=count, company_id=company_id)
+    return IndexResponse(indexed_count=count, ticker=ticker)
 
 
 @router.post("/search", response_model=List[SearchResult], summary="Hybrid search over indexed evidence")
@@ -138,8 +138,8 @@ async def search_evidence(req: SearchRequest):
     retriever = _get_retriever()
 
     filter_meta: Dict[str, Any] = {}
-    if req.company_id:
-        filter_meta["company_id"] = req.company_id
+    if req.ticker:
+        filter_meta["ticker"] = req.ticker
 
     if req.use_hyde and req.dimension:
         llm_router = _get_router()
@@ -170,23 +170,23 @@ async def search_evidence(req: SearchRequest):
 
 
 @router.get(
-    "/justify/{company_id}/{dimension}",
+    "/justify/{ticker}/{dimension}",
     response_model=JustifyResponse,
     summary="Generate cited score justification",
 )
-async def justify_score(company_id: str, dimension: str):
+async def justify_score(ticker: str, dimension: str):
     """Generate IC-ready justification for a dimension score with cited evidence."""
     retriever = _get_retriever()
     llm_router = _get_router()
     gen = JustificationGenerator(retriever=retriever, router=llm_router)
 
     try:
-        j = gen.generate_justification(company_id, dimension)
+        j = gen.generate_justification(ticker, dimension)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
     return JustifyResponse(
-        company_id=j.company_id,
+        ticker=j.company_id,
         dimension=j.dimension,
         score=j.score,
         level=j.level,
@@ -210,12 +210,12 @@ async def justify_score(company_id: str, dimension: str):
 
 
 @router.get(
-    "/ic-prep/{company_id}",
+    "/ic-prep/{ticker}",
     response_model=ICPrepResponse,
     summary="Generate full IC meeting preparation package",
 )
 async def ic_prep(
-    company_id: str,
+    ticker: str,
     dimensions: Optional[str] = Query(
         None,
         description="Comma-separated list of dimensions to include (default: all 7)",
@@ -225,7 +225,7 @@ async def ic_prep(
     focus = [d.strip() for d in dimensions.split(",")] if dimensions else None
     workflow = ICPrepWorkflow()
     try:
-        pkg = workflow.prepare_meeting(company_id, focus_dimensions=focus)
+        pkg = workflow.prepare_meeting(ticker, focus_dimensions=focus)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
