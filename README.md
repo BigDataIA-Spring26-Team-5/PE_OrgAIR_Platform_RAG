@@ -1,5 +1,29 @@
 # 🏢 PE Org-AI-R Platform : CS4
 
+## TL;DR
+
+CS4 is a cleanup/refactoring release on top of CS1–CS3. No new business features —
+the goal was to eliminate technical debt and enforce two architectural invariants:
+
+- **Snowflake**: only accessible through `BaseRepository.execute_query()`
+- **S3**: only accessible through `S3StorageService`
+
+### What was removed
+- 7 dead files deleted (SnowflakeService, integration_service, pipeline2_runner, registry, exporters, pdf_parser, board analysis.py)
+- 9 routers kept on disk but **not registered** in `main.py` — preserved for reference only
+
+### What was added
+- `CompositeScoringService` — single orchestrator for TC → V^R → PF → H^R → Synergy → Org-AI-R
+- `BoardGovernanceService` / `CultureSignalService` — extracted from router files
+- `CompositeScoringRepository` — consolidated all SCORING table reads/writes
+
+### What was refactored
+- 7 routers → thin HTTP wrappers (business logic moved to services)
+- 7 repositories → all extend `BaseRepository` (raw connections removed)
+- Streamlit dashboard → HTTP-only (no direct Snowflake connection)
+
+---
+
 ## Setting up Server
 
 1. Run
