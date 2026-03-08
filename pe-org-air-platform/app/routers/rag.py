@@ -70,6 +70,7 @@ class IndexResponse(BaseModel):
 class SearchRequest(BaseModel):
     query: str
     ticker: Optional[str] = None
+    source_types: Optional[List[str]] = None  # e.g. ["patent_uspto"]
     dimension: Optional[str] = None
     top_k: int = 10
     use_hyde: bool = False
@@ -135,6 +136,7 @@ async def index_company_evidence(
     count = vs.index_cs2_evidence(evidence, mapper)
     if evidence:
         cs2.mark_indexed([e.evidence_id for e in evidence])
+    _get_retriever().refresh_sparse_index()
     return IndexResponse(indexed_count=count, ticker=ticker, source_counts=dict(source_counts))
 
 
@@ -146,6 +148,8 @@ async def search_evidence(req: SearchRequest):
     filter_meta: Dict[str, Any] = {}
     if req.ticker:
         filter_meta["ticker"] = req.ticker
+    if req.source_types:
+        filter_meta["source_type"] = req.source_types
 
     if req.use_hyde and req.dimension:
         llm_router = _get_router()

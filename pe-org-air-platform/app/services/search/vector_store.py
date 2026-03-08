@@ -69,14 +69,20 @@ class VectorStore:
             return 0
 
         documents, embeddings, metadatas, ids = [], [], [], []
+        seen_content_hashes: set = set()
 
         for ev in evidence_list:
             if not ev.content:
                 continue
+            content_hash = hash(ev.content[:2000])
+            if content_hash in seen_content_hashes:
+                continue
+            seen_content_hashes.add(content_hash)
             dim_weights = dimension_mapper.get_dimension_weights(ev.signal_category)
             primary_dim = dimension_mapper.get_primary_dimension(ev.signal_category)
 
             meta = {
+                "evidence_id": ev.evidence_id or "",
                 "ticker": ev.company_id,
                 "source_type": ev.source_type,
                 "signal_category": ev.signal_category,

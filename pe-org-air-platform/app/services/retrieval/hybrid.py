@@ -71,6 +71,33 @@ class HybridRetriever:
                 name="pe_evidence",
                 metadata={"hnsw:space": "cosine"},
             )
+            self._load_bm25_from_chroma()
+
+    def _load_bm25_from_chroma(self):
+        """Seed BM25 sparse index from existing ChromaDB documents."""
+        if self._collection is None or not _BM25_AVAILABLE:
+            return
+        count = self._collection.count()
+        if count == 0:
+            return
+        result = self._collection.get(include=["documents", "metadatas"])
+        self._doc_store = []
+        for doc_id, doc, meta in zip(result["ids"], result["documents"], result["metadatas"]):
+            self._doc_store.append(
+                RetrievedDocument(
+                    doc_id=doc_id,
+                    content=doc,
+                    metadata=meta,
+                    score=0.0,
+                    retrieval_method="sparse",
+                )
+            )
+        self._tokenized_corpus = [d.content.lower().split() for d in self._doc_store]
+        self._bm25 = BM25Okapi(self._tokenized_corpus)
+
+    def refresh_sparse_index(self):
+        """Rebuild BM25 from ChromaDB — call after indexing new documents."""
+        self._load_bm25_from_chroma()
 
     def _encode(self, texts: List[str]) -> List[List[float]]:
         if self._encoder is None:
@@ -145,12 +172,12 @@ class HybridRetriever:
         except Exception:
             return []
         results = []
-        for doc, meta, dist in zip(
-            res["documents"][0], res["metadatas"][0], res["distances"][0]
+        for doc_id, doc, meta, dist in zip(
+            res["ids"][0], res["documents"][0], res["metadatas"][0], res["distances"][0]
         ):
             results.append(
                 RetrievedDocument(
-                    doc_id=meta.get("evidence_id", doc[:30]),
+                    doc_id=doc_id,
                     content=doc,
                     metadata=meta,
                     score=1.0 - dist,
@@ -229,13 +256,23 @@ class HybridRetriever:
     def _build_where(filter_metadata: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         if not filter_metadata:
             return {}
-        conditions = [
-            {k: {"$eq": v}} for k, v in filter_metadata.items()
-        ]
+        conditions = []
+        for k, v in filter_metadata.items():
+            if isinstance(v, list):
+                conditions.append({k: {"$in": v}})
+            else:
+                conditions.append({k: {"$eq": v}})
         if len(conditions) == 1:
             return conditions[0]
         return {"$and": conditions}
 
     @staticmethod
     def _matches_filter(metadata: Dict[str, Any], filter_metadata: Dict[str, Any]) -> bool:
-        return all(metadata.get(k) == v for k, v in filter_metadata.items())
+        for k, v in filter_metadata.items():
+            val = metadata.get(k)
+            if isinstance(v, list):
+                if val not in v:
+                    return False
+            elif val != v:
+                return False
+        return True
