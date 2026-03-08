@@ -178,6 +178,9 @@ app.include_router(scoring_router)           # dimension scoring computation + r
 app.include_router(board_governance_router)  # board composition + governance scoring
 app.include_router(glassdoor_signals_router) # culture signal collection + scoring
 
+from app.routers.rag import router as rag_router
+app.include_router(rag_router)
+
 # COMMENTED OUT — not needed:
 # app.include_router(industries_router)        # static catalog, not used by CS4 clients
 # tc_vr_router, pf_router, hr_router, orgair_router, property_tests_router

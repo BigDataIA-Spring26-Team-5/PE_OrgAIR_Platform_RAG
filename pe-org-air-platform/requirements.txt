@@ -72,3 +72,7 @@ pytest-asyncio>=0.23.0
 pytest-cov>=4.1.0
 fakeredis>=2.21.0
 moto>=5.0.0
+chromadb>=0.4.0
+sentence-transformers>=2.2.0
+rank_bm25>=0.2.2
+litellm>=1.0.0
