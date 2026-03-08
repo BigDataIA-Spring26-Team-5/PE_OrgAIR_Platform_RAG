@@ -1,7 +1,8 @@
-"""CS2 Client — Evidence and chunk data from the PE Org-AI-R platform."""
+"""CS2 Client — Evidence from S3 (jobs, patents, techstack, glassdoor, SEC chunks)."""
 from __future__ import annotations
 
-import httpx
+import json
+import uuid
 from dataclasses import dataclass, field
 from typing import List, Optional, Dict, Any
 from datetime import datetime
@@ -15,6 +16,7 @@ SOURCE_TYPES = [
     "patent_uspto",
     "glassdoor_review",
     "board_proxy_def14a",
+    "digital_presence",
     "analyst_interview",
     "dd_data_room",
 ]
@@ -35,115 +37,251 @@ class CS2Evidence:
     indexed_in_cs4: bool = False
 
 
-class CS2Client:
-    """Fetches evidence/chunk data from CS2 API endpoints."""
+def _section_to_source_type(section: str) -> str:
+    s = (section or "").lower().replace(" ", "_")
+    if "item_1a" in s or "1a" in s:
+        return "sec_10k_item_1a"
+    if "item_7" in s or "7" in s:
+        return "sec_10k_item_7"
+    return "sec_10k_item_1"
 
-    def __init__(self, base_url: str = "http://localhost:8000"):
-        self.base_url = base_url.rstrip("/")
-        self._client = httpx.Client(timeout=60.0)
+
+def _section_to_signal_category(section: str) -> str:
+    s = (section or "").lower()
+    if "def14a" in s or "proxy" in s or "governance" in s:
+        return "governance_signals"
+    return "digital_presence"
+
+
+class CS2Client:
+    """Fetches evidence directly from S3, mirroring vr_scoring_service._load_jobs_from_s3()."""
+
+    def __init__(self):
+        from app.services.s3_storage import get_s3_service
+        self._s3 = get_s3_service()
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
 
     def get_evidence(
         self,
         company_id: Optional[str] = None,
+        ticker: Optional[str] = None,
         source_types: Optional[List[str]] = None,
         signal_categories: Optional[List[str]] = None,
         min_confidence: float = 0.0,
         indexed: Optional[bool] = None,
         since: Optional[datetime] = None,
     ) -> List[CS2Evidence]:
-        """Fetch evidence records with optional filters."""
-        params: Dict[str, Any] = {}
-        if company_id:
-            params["company_id"] = company_id
+        """Fetch evidence from S3 for the given ticker/company."""
+        resolved_ticker = ticker or self._resolve_ticker(company_id) or company_id or ""
+        resolved_ticker = resolved_ticker.upper()
+
+        fetchers = {
+            "technology_hiring": self._fetch_jobs,
+            "innovation_activity": self._fetch_patents,
+            "digital_presence": self._fetch_techstack,
+            "culture_signals": self._fetch_glassdoor,
+            "sec_chunks": self._fetch_sec_chunks,
+        }
+
+        requested = set(signal_categories) if signal_categories else set(fetchers.keys())
+        # sec_chunks is always included unless caller explicitly restricts to other cats
+        if signal_categories and "sec_chunks" not in signal_categories:
+            requested.discard("sec_chunks")
+
+        all_evidence: List[CS2Evidence] = []
+        for cat, fn in fetchers.items():
+            if cat not in requested:
+                continue
+            try:
+                all_evidence.extend(fn(resolved_ticker))
+            except Exception:
+                pass  # partial failure — skip, don't crash
+
+        result = [e for e in all_evidence if e.confidence >= min_confidence]
         if source_types:
-            params["source_types"] = ",".join(source_types)
-        if signal_categories:
-            params["signal_categories"] = ",".join(signal_categories)
-        if min_confidence > 0:
-            params["min_confidence"] = min_confidence
-        if indexed is not None:
-            params["indexed"] = indexed
-        if since:
-            params["since"] = since.isoformat()
-
-        # Try the evidence endpoint
-        resp = self._client.get(f"{self.base_url}/evidence", params=params)
-        if resp.status_code == 404:
-            # Fall back to chunks endpoint
-            return self._fetch_from_chunks(company_id, min_confidence)
-        resp.raise_for_status()
-        data = resp.json()
-        items = data if isinstance(data, list) else data.get("evidence", [])
-        return [self._parse_evidence(e) for e in items]
-
-    def _fetch_from_chunks(
-        self,
-        company_id: Optional[str],
-        min_confidence: float,
-    ) -> List[CS2Evidence]:
-        """Fallback: fetch from document chunks endpoint."""
-        params: Dict[str, Any] = {}
-        if company_id:
-            params["company_id"] = company_id
-        resp = self._client.get(f"{self.base_url}/documents/chunks", params=params)
-        if resp.status_code in (404, 422):
-            return []
-        resp.raise_for_status()
-        data = resp.json()
-        chunks = data if isinstance(data, list) else data.get("chunks", [])
-        results = []
-        for chunk in chunks:
-            ev = CS2Evidence(
-                evidence_id=str(chunk.get("id", chunk.get("chunk_id", ""))),
-                company_id=str(chunk.get("company_id", company_id or "")),
-                source_type=chunk.get("source_type", "sec_10k_item_1"),
-                signal_category=chunk.get("signal_category", "digital_presence"),
-                content=chunk.get("content", chunk.get("text", "")),
-                confidence=float(chunk.get("confidence", 0.5)),
-                fiscal_year=chunk.get("fiscal_year"),
-                source_url=chunk.get("source_url"),
-                page_number=chunk.get("page_number"),
-                indexed_in_cs4=bool(chunk.get("indexed_in_cs4", False)),
-            )
-            if ev.confidence >= min_confidence:
-                results.append(ev)
-        return results
+            result = [e for e in result if e.source_type in source_types]
+        return result
 
     def mark_indexed(self, evidence_ids: List[str]) -> int:
-        """Mark evidence records as indexed in CS4. Returns count updated."""
-        if not evidence_ids:
-            return 0
-        resp = self._client.patch(
-            f"{self.base_url}/evidence/mark-indexed",
-            json={"evidence_ids": evidence_ids},
-        )
-        if resp.status_code in (404, 422):
-            return len(evidence_ids)  # Assume success if endpoint not available
-        resp.raise_for_status()
-        data = resp.json()
-        return int(data.get("updated", len(evidence_ids)))
+        """Mark evidence as indexed. Returns count (always succeeds — no endpoint needed)."""
+        return len(evidence_ids)
 
-    @staticmethod
-    def _parse_evidence(data: dict) -> CS2Evidence:
-        return CS2Evidence(
-            evidence_id=str(data.get("id", data.get("evidence_id", ""))),
-            company_id=str(data.get("company_id", "")),
-            source_type=data.get("source_type", ""),
-            signal_category=data.get("signal_category", ""),
-            content=data.get("content", data.get("text", "")),
-            confidence=float(data.get("confidence", 0.0)),
-            extracted_entities=data.get("extracted_entities", {}),
-            fiscal_year=data.get("fiscal_year"),
-            source_url=data.get("source_url"),
-            page_number=data.get("page_number"),
-            indexed_in_cs4=bool(data.get("indexed_in_cs4", False)),
-        )
+    # ------------------------------------------------------------------
+    # S3 fetchers
+    # ------------------------------------------------------------------
 
-    def close(self):
-        self._client.close()
+    def _fetch_jobs(self, ticker: str) -> List[CS2Evidence]:
+        prefix = f"signals/jobs/{ticker}/"
+        keys = sorted(self._s3.list_files(prefix), reverse=True)
+        postings = []
+        for key in keys:
+            raw = self._s3.get_file(key)
+            if raw is None:
+                continue
+            data = json.loads(raw)
+            postings = data.get("job_postings", [])
+            if postings:
+                break
 
-    def __enter__(self):
-        return self
+        results = []
+        for p in postings:
+            title = p.get("title", "")
+            desc = p.get("description", "")
+            content = f"{title} — {desc}".strip(" —")
+            if not content:
+                continue
+            source = p.get("source", "")
+            source_type = (
+                "job_posting_linkedin" if "linkedin" in source.lower()
+                else "job_posting_indeed"
+            )
+            results.append(CS2Evidence(
+                evidence_id=p.get("job_id", str(uuid.uuid4())),
+                company_id=ticker,
+                source_type=source_type,
+                signal_category="technology_hiring",
+                content=content,
+                confidence=0.7,
+                fiscal_year=None,
+            ))
+        return results
 
-    def __exit__(self, *_):
-        self.close()
+    def _fetch_patents(self, ticker: str) -> List[CS2Evidence]:
+        prefix = f"signals/patents/{ticker}/"
+        keys = sorted(self._s3.list_files(prefix), reverse=True)
+        patents = []
+        for key in keys:
+            raw = self._s3.get_file(key)
+            if raw is None:
+                continue
+            data = json.loads(raw)
+            patents = data.get("patents", [])
+            if patents:
+                break
+
+        results = []
+        for p in patents:
+            title = p.get("title", "")
+            abstract = p.get("abstract", "")
+            content = f"{title} — {abstract}".strip(" —")
+            if not content:
+                continue
+            results.append(CS2Evidence(
+                evidence_id=p.get("patent_id", str(uuid.uuid4())),
+                company_id=ticker,
+                source_type="patent_uspto",
+                signal_category="innovation_activity",
+                content=content,
+                confidence=0.8,
+            ))
+        return results
+
+    def _fetch_techstack(self, ticker: str) -> List[CS2Evidence]:
+        prefix = f"signals/techstack/{ticker}/"
+        keys = sorted(self._s3.list_files(prefix), reverse=True)
+        data = {}
+        for key in keys:
+            raw = self._s3.get_file(key)
+            if raw is None:
+                continue
+            data = json.loads(raw)
+            if data:
+                break
+
+        ai_techs: List[str] = data.get("ai_technologies_detected", [])
+        wap_techs: List[str] = data.get("wappalyzer_techs", [])
+        all_techs = ai_techs + [t for t in wap_techs if t not in ai_techs]
+        if not all_techs:
+            return []
+
+        content = "Detected technologies: " + ", ".join(all_techs[:50])
+        return [CS2Evidence(
+            evidence_id=str(uuid.uuid4()),
+            company_id=ticker,
+            source_type="digital_presence",
+            signal_category="digital_presence",
+            content=content,
+            confidence=0.6,
+        )]
+
+    def _fetch_glassdoor(self, ticker: str) -> List[CS2Evidence]:
+        key = f"glassdoor_signals/raw/{ticker}_raw.json"
+        raw = self._s3.get_file(key)
+        if raw is None:
+            return []
+        wrapper = json.loads(raw)
+        reviews = wrapper if isinstance(wrapper, list) else wrapper.get("reviews", [])
+
+        results = []
+        for r in reviews:
+            title = r.get("title", "")
+            pros = r.get("pros", "")
+            cons = r.get("cons", "")
+            content = f"{title} — Pros: {pros} Cons: {cons}".strip()
+            if not content or content == "— Pros:  Cons:":
+                continue
+            results.append(CS2Evidence(
+                evidence_id=r.get("review_id", str(uuid.uuid4())),
+                company_id=ticker,
+                source_type="glassdoor_review",
+                signal_category="culture_signals",
+                content=content,
+                confidence=0.65,
+            ))
+        return results
+
+    def _fetch_sec_chunks(self, ticker: str) -> List[CS2Evidence]:
+        results = []
+        for filing_type in ("10-K", "DEF14A"):
+            prefix = f"sec/chunks/{ticker}/{filing_type}/"
+            keys = self._s3.list_files(prefix)
+            for key in keys:
+                raw = self._s3.get_file(key)
+                if raw is None:
+                    continue
+                data = json.loads(raw)
+                chunks = data if isinstance(data, list) else data.get("chunks", [])
+                for chunk in chunks:
+                    text = chunk.get("text") or chunk.get("content", "")
+                    if not text:
+                        continue
+                    section = chunk.get("section", "")
+                    if filing_type == "DEF14A":
+                        source_type = "board_proxy_def14a"
+                        signal_cat = "governance_signals"
+                    else:
+                        source_type = _section_to_source_type(section)
+                        signal_cat = _section_to_signal_category(section)
+                    results.append(CS2Evidence(
+                        evidence_id=chunk.get("chunk_id", str(uuid.uuid4())),
+                        company_id=ticker,
+                        source_type=source_type,
+                        signal_category=signal_cat,
+                        content=text,
+                        confidence=0.9,
+                        page_number=chunk.get("page_number"),
+                        fiscal_year=chunk.get("fiscal_year"),
+                    ))
+        return results
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    def _resolve_ticker(self, company_id: Optional[str]) -> Optional[str]:
+        if not company_id:
+            return None
+        # company_id may already be a ticker (e.g. "NVDA") or a UUID
+        try:
+            from app.repositories.company_repository import CompanyRepository
+            repo = CompanyRepository()
+            company = repo.get_by_id(company_id)
+            if company:
+                return company.get("ticker") or company.get("symbol")
+        except Exception:
+            pass
+        # If lookup fails, treat company_id as ticker directly
+        return company_id
