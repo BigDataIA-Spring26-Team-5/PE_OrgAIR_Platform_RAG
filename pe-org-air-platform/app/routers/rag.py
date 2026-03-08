@@ -56,7 +56,6 @@ def _get_mapper() -> DimensionMapper:
 # ── Request / Response Models ─────────────────────────────────────────────────
 
 class IndexRequest(BaseModel):
-    ticker: str
     source_types: Optional[List[str]] = None
     signal_categories: Optional[List[str]] = None
     min_confidence: float = 0.0
@@ -65,6 +64,7 @@ class IndexRequest(BaseModel):
 class IndexResponse(BaseModel):
     indexed_count: int
     ticker: str
+    source_counts: Dict[str, int] = {}
 
 
 class SearchRequest(BaseModel):
@@ -126,10 +126,16 @@ async def index_company_evidence(
         signal_categories=req.signal_categories if req else None,
         min_confidence=req.min_confidence if req else 0.0,
     )
+
+    from collections import defaultdict
+    source_counts: Dict[str, int] = defaultdict(int)
+    for e in evidence:
+        source_counts[e.signal_category] += 1
+
     count = vs.index_cs2_evidence(evidence, mapper)
     if evidence:
         cs2.mark_indexed([e.evidence_id for e in evidence])
-    return IndexResponse(indexed_count=count, ticker=ticker)
+    return IndexResponse(indexed_count=count, ticker=ticker, source_counts=dict(source_counts))
 
 
 @router.post("/search", response_model=List[SearchResult], summary="Hybrid search over indexed evidence")
@@ -257,4 +263,57 @@ async def rag_status():
         "vector_store": "ChromaDB",
         "embedding_model": "all-MiniLM-L6-v2",
         "llm_providers": ["groq/llama-3.1-8b-instant", "deepseek/deepseek-chat"],
+    }
+
+
+@router.get("/debug", summary="Inspect ChromaDB contents")
+async def rag_debug(
+    ticker: Optional[str] = Query(None, description="Filter by ticker"),
+    limit: int = Query(10, description="Max documents to return", le=100),
+):
+    """Show raw ChromaDB documents with metadata — useful for verifying indexing."""
+    vs = _get_vector_store()
+    if vs._collection is None:
+        return {"total": 0, "documents": []}
+
+    total = vs._collection.count()
+    if total == 0:
+        return {"total": 0, "documents": []}
+
+    where = {"ticker": {"$eq": ticker}} if ticker else None
+    kwargs: Dict[str, Any] = {
+        "limit": limit,
+        "include": ["documents", "metadatas"],
+    }
+    if where:
+        kwargs["where"] = where
+
+    try:
+        result = vs._collection.get(**kwargs)
+    except Exception as e:
+        return {"total": total, "error": str(e), "documents": []}
+
+    docs = []
+    for doc_id, doc, meta in zip(result["ids"], result["documents"], result["metadatas"]):
+        docs.append({
+            "id": doc_id,
+            "ticker": meta.get("ticker"),
+            "source_type": meta.get("source_type"),
+            "signal_category": meta.get("signal_category"),
+            "dimension": meta.get("dimension"),
+            "confidence": meta.get("confidence"),
+            "content_preview": doc[:200],
+        })
+
+    # Breakdown by ticker and source_type
+    from collections import Counter
+    all_meta = vs._collection.get(include=["metadatas"])["metadatas"]
+    ticker_counts = Counter(m.get("ticker", "unknown") for m in all_meta)
+    source_counts = Counter(m.get("source_type", "unknown") for m in all_meta)
+
+    return {
+        "total": total,
+        "by_ticker": dict(ticker_counts),
+        "by_source_type": dict(source_counts),
+        "sample": docs,
     }

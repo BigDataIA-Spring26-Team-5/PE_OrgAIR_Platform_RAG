@@ -68,7 +68,7 @@ class HybridRetriever:
                 settings=ChromaSettings(anonymized_telemetry=False),
             )
             self._collection = client.get_or_create_collection(
-                name="pe_evidence_hybrid",
+                name="pe_evidence",
                 metadata={"hnsw:space": "cosine"},
             )
 

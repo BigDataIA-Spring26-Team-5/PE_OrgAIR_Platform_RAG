@@ -122,7 +122,7 @@ class CS2Client:
             if raw is None:
                 continue
             data = json.loads(raw)
-            postings = data.get("job_postings", [])
+            postings = data.get("jobs", data.get("job_postings", []))
             if postings:
                 break
 
@@ -180,7 +180,7 @@ class CS2Client:
         return results
 
     def _fetch_techstack(self, ticker: str) -> List[CS2Evidence]:
-        prefix = f"signals/techstack/{ticker}/"
+        prefix = f"signals/digital/{ticker}/"
         keys = sorted(self._s3.list_files(prefix), reverse=True)
         data = {}
         for key in keys:
@@ -208,8 +208,13 @@ class CS2Client:
         )]
 
     def _fetch_glassdoor(self, ticker: str) -> List[CS2Evidence]:
-        key = f"glassdoor_signals/raw/{ticker}_raw.json"
-        raw = self._s3.get_file(key)
+        prefix = f"glassdoor_signals/raw/{ticker}/"
+        keys = sorted(self._s3.list_files(prefix), reverse=True)
+        raw = None
+        for key in keys:
+            raw = self._s3.get_file(key)
+            if raw is not None:
+                break
         if raw is None:
             return []
         wrapper = json.loads(raw)
