@@ -61,7 +61,7 @@ class HybridRetriever:
 
     def _init_dense(self):
         if _ST_AVAILABLE:
-            self._encoder = SentenceTransformer("all-MiniLM-L6-v2")
+            self._encoder = SentenceTransformer("BAAI/bge-small-en-v1.5")
         if _CHROMA_AVAILABLE:
             client = chromadb.PersistentClient(
                 path=self.persist_dir,
@@ -141,7 +141,7 @@ class HybridRetriever:
         filter_metadata: Optional[Dict[str, Any]] = None,
     ) -> List[RetrievedDocument]:
         """Retrieve top-k documents using RRF-fused hybrid search."""
-        n_candidates = k * 3
+        n_candidates = k * 5
         dense_results = self._dense_search(query, n_candidates, filter_metadata)
         sparse_results = self._sparse_search(query, n_candidates, filter_metadata)
         fused = self._rrf_fusion(dense_results, sparse_results, k)
@@ -198,11 +198,12 @@ class HybridRetriever:
         scores = self._bm25.get_scores(tokens)
         ranked_idx = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)
         results = []
-        for idx in ranked_idx[:k]:
+        for idx in ranked_idx:
+            if len(results) >= k:
+                break
             doc = self._doc_store[idx]
-            if filter_metadata:
-                if not self._matches_filter(doc.metadata, filter_metadata):
-                    continue
+            if filter_metadata and not self._matches_filter(doc.metadata, filter_metadata):
+                continue
             results.append(
                 RetrievedDocument(
                     doc_id=doc.doc_id,

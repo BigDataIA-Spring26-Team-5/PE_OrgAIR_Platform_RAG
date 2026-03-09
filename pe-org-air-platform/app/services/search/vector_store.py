@@ -1,6 +1,7 @@
 """ChromaDB vector store for PE evidence indexing."""
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass, field
 from typing import List, Optional, Dict, Any
@@ -20,7 +21,7 @@ except ImportError:
 
 
 COLLECTION_NAME = "pe_evidence"
-EMBEDDING_MODEL = "all-MiniLM-L6-v2"
+EMBEDDING_MODEL = "BAAI/bge-small-en-v1.5"
 
 
 @dataclass
@@ -74,7 +75,7 @@ class VectorStore:
         for ev in evidence_list:
             if not ev.content:
                 continue
-            content_hash = hash(ev.content[:2000])
+            content_hash = hashlib.sha256(ev.content[:2000].encode()).hexdigest()
             if content_hash in seen_content_hashes:
                 continue
             seen_content_hashes.add(content_hash)
@@ -94,7 +95,8 @@ class VectorStore:
                 "page_number": str(ev.page_number or ""),
             }
             documents.append(ev.content[:2000])  # Chroma has content limits
-            ids.append(ev.evidence_id or f"ev_{hash(ev.content)}")
+            _content_hash = hashlib.sha256(ev.content[:2000].encode()).hexdigest()[:16]
+            ids.append(ev.evidence_id or f"ev_{_content_hash}")
             metadatas.append(meta)
 
         if documents:

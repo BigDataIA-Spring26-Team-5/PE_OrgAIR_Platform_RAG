@@ -1,6 +1,7 @@
 """RAG Router — FastAPI endpoints for CS4 RAG search and justification."""
 from __future__ import annotations
 
+import asyncio
 from typing import List, Optional, Dict, Any
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
@@ -8,7 +9,7 @@ from pydantic import BaseModel
 from app.services.integration.cs1_client import CS1Client
 from app.services.integration.cs2_client import CS2Client
 from app.services.integration.cs3_client import CS3Client
-from app.services.search.vector_store import VectorStore
+from app.services.search.vector_store import VectorStore, EMBEDDING_MODEL
 from app.services.retrieval.hybrid import HybridRetriever
 from app.services.retrieval.dimension_mapper import DimensionMapper
 from app.services.retrieval.hyde import HyDERetriever
@@ -114,18 +115,20 @@ class ICPrepResponse(BaseModel):
 @router.post("/index/{ticker}", response_model=IndexResponse, summary="Index company evidence into ChromaDB")
 async def index_company_evidence(
     ticker: str,
-    req: Optional[IndexRequest] = None,
+    source_types: Optional[str] = Query(None, description="Comma-separated source types to filter (e.g. job_posting_indeed,patent)"),
+    signal_categories: Optional[str] = Query(None, description="Comma-separated signal categories to filter (e.g. technology_hiring,innovation_activity)"),
+    min_confidence: float = Query(0.0, description="Minimum confidence score (0.0–1.0)"),
 ):
-    """Fetch CS2 evidence for a company and index into ChromaDB."""
+    """Fetch CS2 evidence for a company and index into ChromaDB. All filters are optional."""
     cs2 = CS2Client()
     vs = _get_vector_store()
     mapper = _get_mapper()
 
     evidence = cs2.get_evidence(
         ticker=ticker,
-        source_types=req.source_types if req else None,
-        signal_categories=req.signal_categories if req else None,
-        min_confidence=req.min_confidence if req else 0.0,
+        source_types=[s.strip() for s in source_types.split(",")] if source_types else None,
+        signal_categories=[s.strip() for s in signal_categories.split(",")] if signal_categories else None,
+        min_confidence=min_confidence,
     )
 
     from collections import defaultdict
@@ -149,7 +152,12 @@ async def search_evidence(req: SearchRequest):
     if req.ticker:
         filter_meta["ticker"] = req.ticker
     if req.source_types:
-        filter_meta["source_type"] = req.source_types
+        valid_types = [s for s in req.source_types if s and s != "string"]
+        if valid_types:
+            filter_meta["source_type"] = valid_types
+
+    if req.dimension and req.dimension != "string":
+        filter_meta["dimension"] = req.dimension
 
     if req.use_hyde and req.dimension:
         llm_router = _get_router()
@@ -191,7 +199,7 @@ async def justify_score(ticker: str, dimension: str):
     gen = JustificationGenerator(retriever=retriever, router=llm_router)
 
     try:
-        j = gen.generate_justification(ticker, dimension)
+        j = await asyncio.to_thread(gen.generate_justification, ticker, dimension)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -235,7 +243,7 @@ async def ic_prep(
     focus = [d.strip() for d in dimensions.split(",")] if dimensions else None
     workflow = ICPrepWorkflow()
     try:
-        pkg = workflow.prepare_meeting(ticker, focus_dimensions=focus)
+        pkg = await asyncio.to_thread(workflow.prepare_meeting, ticker, focus_dimensions=focus)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -265,7 +273,7 @@ async def rag_status():
         "status": "operational",
         "indexed_documents": vs.count(),
         "vector_store": "ChromaDB",
-        "embedding_model": "all-MiniLM-L6-v2",
+        "embedding_model": EMBEDDING_MODEL,
         "llm_providers": ["groq/llama-3.1-8b-instant", "deepseek/deepseek-chat"],
     }
 

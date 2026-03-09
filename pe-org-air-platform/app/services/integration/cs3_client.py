@@ -69,39 +69,32 @@ class CS3Client:
     """Fetches scoring and rubric data from CS3 API endpoints."""
 
     def __init__(self, base_url: str = "http://localhost:8000"):
-        self.base_url = base_url.rstrip("/")
+        self.base_url = base_url.rstrip("/") + "/api/v1"
         self._client = httpx.Client(timeout=30.0)
 
     def get_assessment(self, company_id: str) -> Optional[CompanyAssessment]:
-        """Fetch the full composite assessment for a company."""
-        # Try by company_id first, then by ticker
-        for path in [
-            f"{self.base_url}/assessments/{company_id}",
-            f"{self.base_url}/scoring/{company_id}",
-        ]:
-            resp = self._client.get(path)
-            if resp.status_code == 200:
-                return self._parse_assessment(resp.json(), company_id)
+        """Fetch the full composite assessment for a company (company_id is ticker)."""
+        resp = self._client.get(f"{self.base_url}/scoring/{company_id}/dimensions")
+        if resp.status_code == 200:
+            return self._parse_assessment(resp.json(), company_id)
         return None
 
     def get_dimension_score(
         self, company_id: str, dimension: str
     ) -> Optional[DimensionScore]:
-        """Fetch score for one specific dimension."""
-        resp = self._client.get(
-            f"{self.base_url}/scores",
-            params={"company_id": company_id, "dimension": dimension},
-        )
-        if resp.status_code == 200:
-            data = resp.json()
-            scores = data if isinstance(data, list) else [data]
-            for s in scores:
-                if s.get("dimension") == dimension or s.get("dimension_name") == dimension:
-                    return self._parse_dimension_score(dimension, s)
-        # Fallback: get full assessment
+        """Fetch score for one specific dimension (company_id is ticker)."""
         assessment = self.get_assessment(company_id)
-        if assessment:
-            return assessment.dimension_scores.get(dimension)
+        if not assessment:
+            return None
+        scores = assessment.dimension_scores
+        # Exact match first
+        if dimension in scores:
+            return scores[dimension]
+        # Prefix/substring match (e.g. "talent" matches "talent_skills")
+        dim_lower = dimension.lower().replace("_management", "").replace("_", "")
+        for key, val in scores.items():
+            if key.startswith(dimension) or dim_lower in key.replace("_", ""):
+                return val
         return None
 
     def get_rubric(
@@ -121,7 +114,8 @@ class CS3Client:
 
     def _parse_assessment(self, data: dict, company_id: str) -> CompanyAssessment:
         dim_scores: Dict[str, DimensionScore] = {}
-        raw_dims = data.get("dimension_scores", data.get("dimensions", {}))
+        # /scoring/{ticker}/dimensions returns {"ticker": ..., "scores": [...]}
+        raw_dims = data.get("scores", data.get("dimension_scores", data.get("dimensions", {})))
         if isinstance(raw_dims, list):
             for d in raw_dims:
                 dim = d.get("dimension", d.get("dimension_name", ""))
