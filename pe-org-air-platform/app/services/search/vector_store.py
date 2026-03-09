@@ -113,6 +113,16 @@ class VectorStore:
 
         return len(documents)
 
+    def delete_by_filter(self, metadata_filter: dict) -> int:
+        """Delete all ChromaDB documents matching the given metadata filter. Returns count deleted."""
+        if self._collection is None:
+            return 0
+        results = self._collection.get(where=metadata_filter, include=[])
+        ids = results.get("ids", [])
+        if ids:
+            self._collection.delete(ids=ids)
+        return len(ids)
+
     def search(
         self,
         query: str,

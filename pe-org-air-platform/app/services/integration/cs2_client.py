@@ -166,11 +166,15 @@ class CS2Client:
         for p in patents:
             title = p.get("title", "")
             abstract = p.get("abstract", "")
-            content = f"{title} — {abstract}".strip(" —")
-            if not content:
+            categories = ", ".join(p.get("ai_categories", []))
+            cat_str = f" | AI Categories: {categories}" if categories else ""
+            content = f"[Patent] {title} — {abstract}{cat_str}".strip()
+            if not content or content == "[Patent]":
                 continue
+            patent_num = p.get("patent_number") or p.get("patent_id", "")
+            evidence_id = f"patent_{ticker}_{patent_num}" if patent_num else f"patent_{ticker}_{uuid.uuid4()}"
             results.append(CS2Evidence(
-                evidence_id=p.get("patent_id", str(uuid.uuid4())),
+                evidence_id=evidence_id,
                 company_id=ticker,
                 source_type="patent_uspto",
                 signal_category="innovation_activity",

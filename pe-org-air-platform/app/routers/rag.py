@@ -115,14 +115,22 @@ class ICPrepResponse(BaseModel):
 @router.post("/index/{ticker}", response_model=IndexResponse, summary="Index company evidence into ChromaDB")
 async def index_company_evidence(
     ticker: str,
-    source_types: Optional[str] = Query(None, description="Comma-separated source types to filter (e.g. job_posting_indeed,patent)"),
+    source_types: Optional[str] = Query(None, description="Comma-separated source types to filter (e.g. job_posting_indeed,patent_uspto)"),
     signal_categories: Optional[str] = Query(None, description="Comma-separated signal categories to filter (e.g. technology_hiring,innovation_activity)"),
     min_confidence: float = Query(0.0, description="Minimum confidence score (0.0–1.0)"),
+    force: bool = Query(False, description="Delete existing docs for this ticker+source_types before re-indexing"),
 ):
     """Fetch CS2 evidence for a company and index into ChromaDB. All filters are optional."""
     cs2 = CS2Client()
     vs = _get_vector_store()
     mapper = _get_mapper()
+
+    if force:
+        st_list = [s.strip() for s in source_types.split(",")] if source_types else None
+        where: dict = {"ticker": {"$eq": ticker}}
+        if st_list:
+            where = {"$and": [where, {"source_type": {"$in": st_list}}]}
+        vs.delete_by_filter(where)
 
     evidence = cs2.get_evidence(
         ticker=ticker,
