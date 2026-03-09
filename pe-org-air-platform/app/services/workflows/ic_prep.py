@@ -50,29 +50,29 @@ class ICPrepWorkflow:
 
     def prepare_meeting(
         self,
-        company_id: str,
+        ticker: str,
         focus_dimensions: Optional[List[str]] = None,
     ) -> ICMeetingPackage:
         """Generate full IC meeting package for a company."""
         # Step 1: Fetch company metadata
-        company = self.cs1.get_company(company_id)
+        company = self.cs1.get_company(ticker)
         if company is None:
             company = Company(
-                company_id=company_id,
-                ticker=company_id,
-                name=company_id,
+                company_id=ticker,
+                ticker=ticker,
+                name=ticker,
                 sector="Unknown",
             )
 
         # Step 2: Fetch assessment
-        assessment = self.cs3.get_assessment(company_id)
+        assessment = self.cs3.get_assessment(ticker)
 
         # Step 3: Generate justifications for each dimension
         dims_to_process = focus_dimensions or DIMENSIONS
         justifications: Dict[str, ScoreJustification] = {}
         for dim in dims_to_process:
             try:
-                j = self.generator.generate_justification(company_id, dim)
+                j = self.generator.generate_justification(ticker, dim)
                 justifications[dim] = j
             except Exception as e:
                 # Log and continue — don't fail entire package for one dim

@@ -19,6 +19,10 @@ from app.routers.evidence import router as evidence_router
 from app.routers.scoring import router as scoring_router
 from app.routers.board_governance import router as board_governance_router
 from app.routers.glassdoor_signals import router as glassdoor_signals_router
+from app.routers.tc_vr_scoring import router as tc_vr_router
+from app.routers.position_factor import router as pf_router
+from app.routers.hr_scoring import router as hr_router
+from app.routers.orgair_scoring import router as orgair_router
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.shutdown import set_shutdown, is_shutting_down
@@ -181,9 +185,13 @@ app.include_router(glassdoor_signals_router) # culture signal collection + scori
 from app.routers.rag import router as rag_router
 app.include_router(rag_router)
 
+app.include_router(tc_vr_router)             # TC + V^R computation
+app.include_router(pf_router)               # Position Factor computation
+app.include_router(hr_router)               # Human Capital Risk computation
+app.include_router(orgair_router)           # Synergy + Org-AI-R computation
+
 # COMMENTED OUT — not needed:
 # app.include_router(industries_router)        # static catalog, not used by CS4 clients
-# tc_vr_router, pf_router, hr_router, orgair_router, property_tests_router
 
 
 # ROOT ENDPOINT

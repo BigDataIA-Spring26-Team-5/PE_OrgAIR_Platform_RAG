@@ -2,10 +2,11 @@
 from __future__ import annotations
 
 import json
-import uuid
 from dataclasses import dataclass, field
 from typing import List, Optional, Dict, Any
 from datetime import datetime
+
+from app.utils.id_utils import stable_evidence_id
 
 SOURCE_TYPES = [
     "sec_10k_item_1",
@@ -122,7 +123,7 @@ class CS2Client:
             if raw is None:
                 continue
             data = json.loads(raw)
-            postings = data.get("job_postings", [])
+            postings = data.get("jobs", data.get("job_postings", []))
             if postings:
                 break
 
@@ -139,7 +140,7 @@ class CS2Client:
                 else "job_posting_indeed"
             )
             results.append(CS2Evidence(
-                evidence_id=p.get("job_id", str(uuid.uuid4())),
+                evidence_id=p.get("job_id") or stable_evidence_id(ticker, source_type, content),
                 company_id=ticker,
                 source_type=source_type,
                 signal_category="technology_hiring",
@@ -166,11 +167,15 @@ class CS2Client:
         for p in patents:
             title = p.get("title", "")
             abstract = p.get("abstract", "")
-            content = f"{title} — {abstract}".strip(" —")
-            if not content:
+            categories = ", ".join(p.get("ai_categories", []))
+            cat_str = f" | AI Categories: {categories}" if categories else ""
+            content = f"[Patent] {title} — {abstract}{cat_str}".strip()
+            if not content or content == "[Patent]":
                 continue
+            patent_num = p.get("patent_number") or p.get("patent_id", "")
+            evidence_id = f"patent_{ticker}_{patent_num}" if patent_num else stable_evidence_id(ticker, "patent_uspto", content)
             results.append(CS2Evidence(
-                evidence_id=p.get("patent_id", str(uuid.uuid4())),
+                evidence_id=evidence_id,
                 company_id=ticker,
                 source_type="patent_uspto",
                 signal_category="innovation_activity",
@@ -180,7 +185,7 @@ class CS2Client:
         return results
 
     def _fetch_techstack(self, ticker: str) -> List[CS2Evidence]:
-        prefix = f"signals/techstack/{ticker}/"
+        prefix = f"signals/digital/{ticker}/"
         keys = sorted(self._s3.list_files(prefix), reverse=True)
         data = {}
         for key in keys:
@@ -199,7 +204,7 @@ class CS2Client:
 
         content = "Detected technologies: " + ", ".join(all_techs[:50])
         return [CS2Evidence(
-            evidence_id=str(uuid.uuid4()),
+            evidence_id=stable_evidence_id(ticker, "digital_presence", content),
             company_id=ticker,
             source_type="digital_presence",
             signal_category="digital_presence",
@@ -208,8 +213,13 @@ class CS2Client:
         )]
 
     def _fetch_glassdoor(self, ticker: str) -> List[CS2Evidence]:
-        key = f"glassdoor_signals/raw/{ticker}_raw.json"
-        raw = self._s3.get_file(key)
+        prefix = f"glassdoor_signals/raw/{ticker}/"
+        keys = sorted(self._s3.list_files(prefix), reverse=True)
+        raw = None
+        for key in keys:
+            raw = self._s3.get_file(key)
+            if raw is not None:
+                break
         if raw is None:
             return []
         wrapper = json.loads(raw)
@@ -224,7 +234,7 @@ class CS2Client:
             if not content or content == "— Pros:  Cons:":
                 continue
             results.append(CS2Evidence(
-                evidence_id=r.get("review_id", str(uuid.uuid4())),
+                evidence_id=r.get("review_id") or stable_evidence_id(ticker, "glassdoor_review", content),
                 company_id=ticker,
                 source_type="glassdoor_review",
                 signal_category="culture_signals",
@@ -256,7 +266,7 @@ class CS2Client:
                         source_type = _section_to_source_type(section)
                         signal_cat = _section_to_signal_category(section)
                     results.append(CS2Evidence(
-                        evidence_id=chunk.get("chunk_id", str(uuid.uuid4())),
+                        evidence_id=chunk.get("chunk_id") or stable_evidence_id(ticker, source_type, text),
                         company_id=ticker,
                         source_type=source_type,
                         signal_category=signal_cat,

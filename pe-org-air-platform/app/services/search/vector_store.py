@@ -1,6 +1,7 @@
 """ChromaDB vector store for PE evidence indexing."""
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass, field
 from typing import List, Optional, Dict, Any
@@ -20,7 +21,7 @@ except ImportError:
 
 
 COLLECTION_NAME = "pe_evidence"
-EMBEDDING_MODEL = "all-MiniLM-L6-v2"
+EMBEDDING_MODEL = "BAAI/bge-small-en-v1.5"
 
 
 @dataclass
@@ -69,15 +70,21 @@ class VectorStore:
             return 0
 
         documents, embeddings, metadatas, ids = [], [], [], []
+        seen_content_hashes: set = set()
 
         for ev in evidence_list:
             if not ev.content:
                 continue
+            content_hash = hashlib.sha256(ev.content[:2000].encode()).hexdigest()
+            if content_hash in seen_content_hashes:
+                continue
+            seen_content_hashes.add(content_hash)
             dim_weights = dimension_mapper.get_dimension_weights(ev.signal_category)
             primary_dim = dimension_mapper.get_primary_dimension(ev.signal_category)
 
             meta = {
-                "company_id": ev.company_id,
+                "evidence_id": ev.evidence_id or "",
+                "ticker": ev.company_id,
                 "source_type": ev.source_type,
                 "signal_category": ev.signal_category,
                 "dimension": primary_dim,
@@ -88,7 +95,8 @@ class VectorStore:
                 "page_number": str(ev.page_number or ""),
             }
             documents.append(ev.content[:2000])  # Chroma has content limits
-            ids.append(ev.evidence_id or f"ev_{hash(ev.content)}")
+            _content_hash = hashlib.sha256(ev.content[:2000].encode()).hexdigest()[:16]
+            ids.append(ev.evidence_id or f"ev_{_content_hash}")
             metadatas.append(meta)
 
         if documents:
@@ -105,11 +113,21 @@ class VectorStore:
 
         return len(documents)
 
+    def delete_by_filter(self, metadata_filter: dict) -> int:
+        """Delete all ChromaDB documents matching the given metadata filter. Returns count deleted."""
+        if self._collection is None:
+            return 0
+        results = self._collection.get(where=metadata_filter, include=[])
+        ids = results.get("ids", [])
+        if ids:
+            self._collection.delete(ids=ids)
+        return len(ids)
+
     def search(
         self,
         query: str,
         top_k: int = 10,
-        company_id: Optional[str] = None,
+        ticker: Optional[str] = None,
         dimension: Optional[str] = None,
         source_types: Optional[List[str]] = None,
         min_confidence: float = 0.0,
@@ -120,8 +138,8 @@ class VectorStore:
 
         where: Dict[str, Any] = {}
         conditions = []
-        if company_id:
-            conditions.append({"company_id": {"$eq": company_id}})
+        if ticker:
+            conditions.append({"ticker": {"$eq": ticker}})
         if dimension:
             conditions.append({"dimension": {"$eq": dimension}})
         if source_types:
@@ -165,6 +183,18 @@ class VectorStore:
                 )
             )
         return output
+
+    def wipe(self) -> int:
+        """Delete all documents by dropping and recreating the collection. Returns doc count before wipe."""
+        if self._collection is None:
+            return 0
+        count = self._collection.count()
+        self._client.delete_collection(COLLECTION_NAME)
+        self._collection = self._client.get_or_create_collection(
+            name=COLLECTION_NAME,
+            metadata={"hnsw:space": "cosine"},
+        )
+        return count
 
     def count(self) -> int:
         if self._collection is None:

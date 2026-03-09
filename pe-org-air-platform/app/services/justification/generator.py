@@ -1,8 +1,12 @@
 """Score Justification Generator — cited evidence for IC-ready summaries."""
 from __future__ import annotations
 
+import logging
+import re
 from dataclasses import dataclass, field
 from typing import List, Optional, Dict, Any
+
+logger = logging.getLogger(__name__)
 
 from app.services.integration.cs3_client import CS3Client, DimensionScore, RubricCriteria
 from app.services.retrieval.hybrid import HybridRetriever, RetrievedDocument
@@ -75,11 +79,11 @@ class JustificationGenerator:
         self.router = router or ModelRouter()
 
     def generate_justification(
-        self, company_id: str, dimension: str
+        self, ticker: str, dimension: str
     ) -> ScoreJustification:
         """Full pipeline: fetch score → retrieve evidence → generate summary."""
         # Step 1: Fetch CS3 dimension score
-        dim_score = self.cs3.get_dimension_score(company_id, dimension)
+        dim_score = self.cs3.get_dimension_score(ticker, dimension)
         if dim_score is None:
             dim_score = DimensionScore(
                 dimension=dimension, score=50.0, level=3, level_name="Adequate"
@@ -94,9 +98,16 @@ class JustificationGenerator:
         query = f"{dimension} " + " ".join(rubric_keywords[:5])
 
         # Step 4: Retrieve evidence
-        filter_meta: Dict[str, Any] = {"company_id": company_id}
-        if dimension:
-            filter_meta["dimension"] = dimension
+        # ChromaDB stores short dimension names; map API names to stored names
+        _DIM_NORMALIZE = {
+            "talent_skills": "talent", "talent_management": "talent",
+            "leadership_vision": "leadership",
+            "culture_change": "culture",
+        }
+        chroma_dim = _DIM_NORMALIZE.get(dimension, dimension)
+        filter_meta: Dict[str, Any] = {"ticker": ticker}
+        if chroma_dim:
+            filter_meta["dimension"] = chroma_dim
         raw_results = self.retriever.retrieve(query, k=15, filter_metadata=filter_meta)
 
         # Step 5: Match to rubric keywords
@@ -110,12 +121,16 @@ class JustificationGenerator:
         # Step 7: Call DeepSeek for IC summary
         ci = dim_score.confidence_interval
         evidence_text = "\n".join(
-            f"- [{e.source_type}] {e.content[:300]}..." for e in cited[:5]
+            f"- [{e.source_type}] {e.content[:1000]}..." for e in cited[:5]
         ) or "No specific evidence retrieved."
         gaps_text = "\n".join(f"- {g}" for g in gaps) or "None identified."
 
+        logger.debug(
+            "LLM evidence_text for %s/%s (%d pieces):\n%s",
+            ticker, dimension, len(cited), evidence_text
+        )
         prompt = JUSTIFICATION_PROMPT.format(
-            company_id=company_id,
+            company_id=ticker,
             dimension=dimension,
             score=dim_score.score,
             level=dim_score.level,
@@ -129,16 +144,25 @@ class JustificationGenerator:
             next_level=next_level,
         )
         messages = [
-            {"role": "system", "content": "You are a senior PE investment analyst."},
+            {
+                "role": "system",
+                "content": (
+                    "You are a senior PE investment analyst. "
+                    "Answer ONLY using the evidence provided in the prompt below. "
+                    "Do not use outside knowledge. If the evidence does not support a claim, "
+                    "state explicitly that evidence is insufficient."
+                ),
+            },
             {"role": "user", "content": prompt},
         ]
         try:
             summary = self.router.complete("justification_generation", messages)
         except Exception as e:
             summary = f"[Summary generation unavailable: {e}]"
+        summary = self._verify_citations(summary, cited)
 
         return ScoreJustification(
-            company_id=company_id,
+            company_id=ticker,
             dimension=dimension,
             score=dim_score.score,
             level=dim_score.level,
@@ -159,14 +183,12 @@ class JustificationGenerator:
         """Filter and rank evidence by keyword overlap and relevance."""
         cited = []
         for r in results:
-            if r.score < 0.3:
-                continue
             content_lower = r.content.lower()
             matched = [kw for kw in keywords if kw.lower() in content_lower]
             cited.append(
                 CitedEvidence(
                     evidence_id=r.doc_id,
-                    content=r.content[:500],
+                    content=r.content[:1000],
                     source_type=r.metadata.get("source_type", ""),
                     source_url=r.metadata.get("source_url", ""),
                     confidence=float(r.metadata.get("confidence", 0.5)),
@@ -175,6 +197,24 @@ class JustificationGenerator:
                 )
             )
         return sorted(cited, key=lambda x: x.relevance_score, reverse=True)
+
+    @staticmethod
+    def _verify_citations(summary: str, cited: List[CitedEvidence]) -> str:
+        """Append a note if evidence is empty or summary references phantom source types."""
+        if not cited:
+            return summary + (
+                "\n\n[Note: No supporting evidence was retrieved. "
+                "Summary is based on scoring metadata only.]"
+            )
+        valid_types = {e.source_type for e in cited if e.source_type}
+        mentioned = set(re.findall(r'\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b', summary))
+        phantom = mentioned - valid_types
+        if phantom:
+            return summary + (
+                f"\n\n[Verification note: Summary references source type(s) "
+                f"{sorted(phantom)} not present in retrieved evidence.]"
+            )
+        return summary
 
     @staticmethod
     def _identify_gaps(
