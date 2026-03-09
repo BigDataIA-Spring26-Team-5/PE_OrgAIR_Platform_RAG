@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import asyncio
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Union
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
@@ -66,6 +66,20 @@ class IndexResponse(BaseModel):
     indexed_count: int
     ticker: str
     source_counts: Dict[str, int] = {}
+
+
+class BulkIndexRequest(BaseModel):
+    tickers: List[str]
+    source_types: Optional[List[str]] = None
+    signal_categories: Optional[List[str]] = None
+    min_confidence: float = 0.0
+    force: bool = False
+
+
+class BulkIndexResponse(BaseModel):
+    results: Dict[str, IndexResponse]
+    total_indexed: int
+    failed: Dict[str, str]  # ticker → error message
 
 
 class SearchRequest(BaseModel):
@@ -149,6 +163,73 @@ async def index_company_evidence(
         cs2.mark_indexed([e.evidence_id for e in evidence])
     _get_retriever().refresh_sparse_index()
     return IndexResponse(indexed_count=count, ticker=ticker, source_counts=dict(source_counts))
+
+
+@router.post("/index", response_model=BulkIndexResponse, summary="Bulk index multiple tickers into ChromaDB")
+async def bulk_index_evidence(req: BulkIndexRequest):
+    """Index CS2 evidence for multiple tickers in a single call. Continues on per-ticker errors."""
+    cs2 = CS2Client()
+    vs = _get_vector_store()
+    mapper = _get_mapper()
+
+    from collections import defaultdict
+    results: Dict[str, IndexResponse] = {}
+    failed: Dict[str, str] = {}
+
+    for ticker in req.tickers:
+        try:
+            if req.force:
+                where: dict = {"ticker": {"$eq": ticker}}
+                if req.source_types:
+                    where = {"$and": [where, {"source_type": {"$in": req.source_types}}]}
+                vs.delete_by_filter(where)
+
+            evidence = cs2.get_evidence(
+                ticker=ticker,
+                source_types=req.source_types,
+                signal_categories=req.signal_categories,
+                min_confidence=req.min_confidence,
+            )
+
+            source_counts: Dict[str, int] = defaultdict(int)
+            for e in evidence:
+                source_counts[e.signal_category] += 1
+
+            count = vs.index_cs2_evidence(evidence, mapper)
+            if evidence:
+                cs2.mark_indexed([e.evidence_id for e in evidence])
+
+            results[ticker] = IndexResponse(
+                indexed_count=count,
+                ticker=ticker,
+                source_counts=dict(source_counts),
+            )
+        except Exception as e:
+            failed[ticker] = str(e)
+
+    _get_retriever().refresh_sparse_index()
+
+    total_indexed = sum(r.indexed_count for r in results.values())
+    return BulkIndexResponse(results=results, total_indexed=total_indexed, failed=failed)
+
+
+@router.delete("/index", summary="Wipe ChromaDB index (all or single ticker)")
+async def wipe_index(
+    ticker: Optional[str] = Query(None, description="If set, wipe only this ticker's documents; otherwise wipe all"),
+):
+    """Delete documents from the ChromaDB index. Omit ticker to wipe everything."""
+    vs = _get_vector_store()
+
+    if ticker:
+        wiped = vs.delete_by_filter({"ticker": {"$eq": ticker}})
+        scope = ticker
+    else:
+        wiped = vs.wipe()
+        scope = "all"
+        # Reset sparse index since all documents are gone
+        _get_retriever().refresh_sparse_index()
+
+    return {"wiped_count": wiped, "scope": scope}
 
 
 @router.post("/search", response_model=List[SearchResult], summary="Hybrid search over indexed evidence")

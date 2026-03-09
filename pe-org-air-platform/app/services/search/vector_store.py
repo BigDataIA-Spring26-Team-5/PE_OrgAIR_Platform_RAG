@@ -184,6 +184,18 @@ class VectorStore:
             )
         return output
 
+    def wipe(self) -> int:
+        """Delete all documents by dropping and recreating the collection. Returns doc count before wipe."""
+        if self._collection is None:
+            return 0
+        count = self._collection.count()
+        self._client.delete_collection(COLLECTION_NAME)
+        self._collection = self._client.get_or_create_collection(
+            name=COLLECTION_NAME,
+            metadata={"hnsw:space": "cosine"},
+        )
+        return count
+
     def count(self) -> int:
         if self._collection is None:
             return 0
