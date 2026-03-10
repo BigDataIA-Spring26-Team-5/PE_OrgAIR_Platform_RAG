@@ -48,9 +48,13 @@ def _section_to_source_type(section: str) -> str:
 
 
 def _section_to_signal_category(section: str) -> str:
-    s = (section or "").lower()
+    s = (section or "").lower().replace(" ", "_")  # match _section_to_source_type() normalization
     if "def14a" in s or "proxy" in s or "governance" in s:
         return "governance_signals"
+    if "item_1a" in s or "1a" in s:               # item_1a BEFORE item_1 to avoid substring match
+        return "digital_presence"
+    if "item_1" in s or "item_7" in s or "business" in s or "management" in s:
+        return "leadership_signals"
     return "digital_presence"
 
 
