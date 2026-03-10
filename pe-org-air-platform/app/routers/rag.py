@@ -16,6 +16,9 @@ from app.services.retrieval.hyde import HyDERetriever
 from app.services.justification.generator import JustificationGenerator
 from app.services.workflows.ic_prep import ICPrepWorkflow
 from app.services.llm.router import ModelRouter
+import structlog
+
+logger = structlog.get_logger(__name__)
 
 router = APIRouter(prefix="/rag", tags=["CS4 RAG"])
 
@@ -135,6 +138,13 @@ async def index_company_evidence(
     force: bool = Query(False, description="Delete existing docs for this ticker+source_types before re-indexing"),
 ):
     """Fetch CS2 evidence for a company and index into ChromaDB. All filters are optional."""
+    logger.info(
+        "rag.index_start",
+        ticker=ticker,
+        force=force,
+        source_types=source_types,
+        signal_categories=signal_categories,
+    )
     cs2 = CS2Client()
     vs = _get_vector_store()
     mapper = _get_mapper()
@@ -162,12 +172,14 @@ async def index_company_evidence(
     if evidence:
         cs2.mark_indexed([e.evidence_id for e in evidence])
     _get_retriever().refresh_sparse_index()
+    logger.info("rag.index_complete", ticker=ticker, indexed_count=count, source_counts=dict(source_counts))
     return IndexResponse(indexed_count=count, ticker=ticker, source_counts=dict(source_counts))
 
 
 @router.post("/index", response_model=BulkIndexResponse, summary="Bulk index multiple tickers into ChromaDB")
 async def bulk_index_evidence(req: BulkIndexRequest):
     """Index CS2 evidence for multiple tickers in a single call. Continues on per-ticker errors."""
+    logger.info("rag.bulk_index_start", tickers=req.tickers, force=req.force)
     cs2 = CS2Client()
     vs = _get_vector_store()
     mapper = _get_mapper()
@@ -204,12 +216,15 @@ async def bulk_index_evidence(req: BulkIndexRequest):
                 ticker=ticker,
                 source_counts=dict(source_counts),
             )
+            logger.info("rag.bulk_index_ticker_complete", ticker=ticker, indexed_count=count)
         except Exception as e:
             failed[ticker] = str(e)
+            logger.warning("rag.bulk_index_ticker_error", ticker=ticker, error=str(e))
 
     _get_retriever().refresh_sparse_index()
 
     total_indexed = sum(r.indexed_count for r in results.values())
+    logger.info("rag.bulk_index_complete", total_indexed=total_indexed, failed_count=len(failed))
     return BulkIndexResponse(results=results, total_indexed=total_indexed, failed=failed)
 
 
@@ -218,23 +233,32 @@ async def wipe_index(
     ticker: Optional[str] = Query(None, description="If set, wipe only this ticker's documents; otherwise wipe all"),
 ):
     """Delete documents from the ChromaDB index. Omit ticker to wipe everything."""
+    scope = ticker if ticker else "all"
+    logger.info("rag.wipe_start", scope=scope)
     vs = _get_vector_store()
 
     if ticker:
         wiped = vs.delete_by_filter({"ticker": {"$eq": ticker}})
-        scope = ticker
     else:
         wiped = vs.wipe()
-        scope = "all"
         # Reset sparse index since all documents are gone
         _get_retriever().refresh_sparse_index()
 
+    logger.info("rag.wipe_complete", scope=scope, wiped_count=wiped)
     return {"wiped_count": wiped, "scope": scope}
 
 
 @router.post("/search", response_model=List[SearchResult], summary="Hybrid search over indexed evidence")
 async def search_evidence(req: SearchRequest):
     """Hybrid dense + sparse search with optional HyDE enhancement."""
+    logger.info(
+        "rag.search_start",
+        query_len=len(req.query),
+        ticker=req.ticker,
+        use_hyde=req.use_hyde,
+        dimension=req.dimension,
+        top_k=req.top_k,
+    )
     retriever = _get_retriever()
 
     filter_meta: Dict[str, Any] = {}
@@ -264,6 +288,8 @@ async def search_evidence(req: SearchRequest):
             filter_metadata=filter_meta or None,
         )
 
+    top_score = results[0].score if results else 0.0
+    logger.info("rag.search_complete", result_count=len(results), top_score=top_score)
     return [
         SearchResult(
             doc_id=r.doc_id,
@@ -283,6 +309,7 @@ async def search_evidence(req: SearchRequest):
 )
 async def justify_score(ticker: str, dimension: str):
     """Generate IC-ready justification for a dimension score with cited evidence."""
+    logger.info("rag.justify_start", ticker=ticker, dimension=dimension)
     retriever = _get_retriever()
     llm_router = _get_router()
     gen = JustificationGenerator(retriever=retriever, router=llm_router)
@@ -290,8 +317,18 @@ async def justify_score(ticker: str, dimension: str):
     try:
         j = await asyncio.to_thread(gen.generate_justification, ticker, dimension)
     except Exception as e:
+        logger.error("rag.justify_error", ticker=ticker, dimension=dimension, error=str(e))
         raise HTTPException(status_code=500, detail=str(e))
 
+    logger.info(
+        "rag.justify_complete",
+        ticker=ticker,
+        dimension=dimension,
+        score=j.score,
+        level=j.level,
+        evidence_count=len(j.supporting_evidence),
+        gaps_count=len(j.gaps_identified),
+    )
     return JustifyResponse(
         ticker=j.company_id,
         dimension=j.dimension,
@@ -330,16 +367,24 @@ async def ic_prep(
 ):
     """Generate full 7-dimension IC meeting package with recommendation."""
     focus = [d.strip() for d in dimensions.split(",")] if dimensions else None
+    logger.info("rag.ic_prep_start", ticker=ticker, focus_dimensions=focus)
     workflow = ICPrepWorkflow()
     try:
         pkg = await asyncio.to_thread(workflow.prepare_meeting, ticker, focus_dimensions=focus)
     except Exception as e:
+        logger.error("rag.ic_prep_error", ticker=ticker, error=str(e))
         raise HTTPException(status_code=500, detail=str(e))
 
     dim_scores = {
         dim: j.score for dim, j in pkg.dimension_justifications.items()
     }
-
+    logger.info(
+        "rag.ic_prep_complete",
+        ticker=ticker,
+        recommendation=pkg.recommendation,
+        dim_count=len(dim_scores),
+        evidence_count=pkg.total_evidence_count,
+    )
     return ICPrepResponse(
         company_id=pkg.company.company_id,
         ticker=pkg.company.ticker,
@@ -358,9 +403,11 @@ async def ic_prep(
 async def rag_status():
     """Returns ChromaDB index stats and system status."""
     vs = _get_vector_store()
+    indexed = vs.count()
+    logger.info("rag.status_checked", indexed_documents=indexed)
     return {
         "status": "operational",
-        "indexed_documents": vs.count(),
+        "indexed_documents": indexed,
         "vector_store": "ChromaDB",
         "embedding_model": EMBEDDING_MODEL,
         "llm_providers": ["groq/llama-3.1-8b-instant", "deepseek/deepseek-chat"],
@@ -412,6 +459,7 @@ async def rag_debug(
     ticker_counts = Counter(m.get("ticker", "unknown") for m in all_meta)
     source_counts = Counter(m.get("source_type", "unknown") for m in all_meta)
 
+    logger.info("rag.debug_queried", ticker=ticker, limit=limit, total=total, returned_count=len(docs))
     return {
         "total": total,
         "by_ticker": dict(ticker_counts),

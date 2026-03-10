@@ -20,9 +20,10 @@ SIGNAL_TO_DIMENSION_MAP: Dict[str, Dict[str, float]] = {
         "technology_stack": 0.40,
     },
     "leadership_signals": {
-        "leadership": 0.60,
-        "ai_governance": 0.25,
-        "culture": 0.15,
+        "leadership": 0.45,          # was 0.60
+        "use_case_portfolio": 0.25,  # new — Item 1 business description maps here
+        "ai_governance": 0.20,       # was 0.25
+        "culture": 0.10,             # was 0.15
     },
     "culture_signals": {
         "culture": 0.80,

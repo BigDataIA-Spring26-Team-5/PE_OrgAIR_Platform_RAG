@@ -121,10 +121,11 @@ class ICPrepWorkflow:
     def _identify_strengths(justifications: Dict[str, ScoreJustification]) -> List[str]:
         strengths = []
         for dim, j in justifications.items():
-            if j.level >= 4 and j.evidence_strength in ("strong", "moderate"):
-                strengths.append(
-                    f"{dim.replace('_', ' ').title()}: Level {j.level} ({j.score:.0f}/100) — {j.level_name}"
-                )
+            if j.level >= 4:
+                label = f"{dim.replace('_', ' ').title()}: Level {j.level} ({j.score:.0f}/100) — {j.level_name}"
+                if j.evidence_strength == "weak":
+                    label += " (score-driven; limited evidence)"
+                strengths.append(label)
         return strengths
 
     @staticmethod
@@ -180,11 +181,15 @@ class ICPrepWorkflow:
             sum(j.score for j in justifications.values()) / n_dims
             if n_dims > 0 else 0.0
         )
-        org_air = assessment.org_air_score if assessment else 0.0
+        org_air_str = (
+            f"{assessment.org_air_score:.1f}"
+            if assessment and assessment.org_air_score
+            else "not yet computed"
+        )
         return (
             f"{company.name} ({company.ticker}) demonstrates an average AI readiness score of "
             f"{avg_score:.0f}/100 across {n_dims} assessed dimensions, with an Org-AI-R composite "
-            f"of {org_air:.1f}. The company operates in {company.sector} with approximately "
+            f"of {org_air_str}. The company operates in {company.sector} with approximately "
             f"{company.employee_count:,} employees and ${company.revenue_millions:.0f}M revenue. "
             f"Key differentiators and risk factors are detailed in the dimension-level justifications below."
         )
@@ -200,9 +205,10 @@ class ICPrepWorkflow:
         avg_score = sum(j.score for j in justifications.values()) / len(justifications)
         n_weak = sum(1 for j in justifications.values() if j.level <= 2)
         n_high_risk = len([r for r in risks if "High" in r or "Elevated" in r])
+        n_weak_evidence = sum(1 for j in justifications.values() if j.evidence_strength == "weak")
 
-        if avg_score >= 65 and n_weak == 0 and n_high_risk == 0:
+        if avg_score >= 65 and n_weak == 0 and n_high_risk == 0 and n_weak_evidence <= 1:
             return "PROCEED"
-        if avg_score >= 45 and n_weak <= 2:
+        if avg_score >= 45 and n_weak <= 2 and n_weak_evidence <= 3:
             return "PROCEED WITH CAUTION"
         return "FURTHER DILIGENCE"
