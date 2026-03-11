@@ -2,11 +2,48 @@
 from __future__ import annotations
 
 import json
+import logging
+import os
 from dataclasses import dataclass, field
 from typing import List, Optional, Dict, Any
 from datetime import datetime
 
+import httpx
+
 from app.utils.id_utils import stable_evidence_id
+
+logger = logging.getLogger(__name__)
+
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+GROQ_MODEL = "llama-3.1-8b-instant"
+GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
+
+SIGNAL_KEYWORDS: Dict[str, List[str]] = {
+    "technology_hiring": [
+        "machine learning", "data science", "AI engineer", "software engineer",
+        "cloud", "python", "MLOps", "LLM", "deep learning", "NLP",
+    ],
+    "innovation_activity": [
+        "patent", "R&D", "invention", "USPTO", "intellectual property",
+        "innovation", "research", "technology development",
+    ],
+    "digital_presence": [
+        "cloud infrastructure", "AWS", "Azure", "GCP", "tech stack",
+        "digital transformation", "AI platform", "data platform", "SaaS",
+    ],
+    "leadership_signals": [
+        "CEO", "CTO", "CDO", "board", "executive", "strategy",
+        "AI governance", "digital strategy", "technology leadership",
+    ],
+    "glassdoor_culture": [
+        "culture", "innovation", "data-driven", "AI awareness",
+        "change readiness", "employee", "work environment",
+    ],
+    "board_governance": [
+        "board committee", "tech committee", "AI expertise", "independent director",
+        "risk oversight", "governance", "proxy statement", "DEF 14A",
+    ],
+}
 
 SOURCE_TYPES = [
     "sec_10k_item_1",
@@ -56,6 +93,75 @@ def _section_to_signal_category(section: str) -> str:
     if "item_1" in s or "item_7" in s or "business" in s or "management" in s:
         return "leadership_signals"
     return "digital_presence"
+
+
+async def expand_keywords_with_groq(ticker: str, category: str) -> List[str]:
+    """
+    Use Groq LLM to expand keywords for a given signal category and company.
+    Falls back to the static SIGNAL_KEYWORDS list if Groq is unavailable.
+    """
+    if not GROQ_API_KEY:
+        return SIGNAL_KEYWORDS.get(category, [])
+
+    base_keywords = SIGNAL_KEYWORDS.get(category, [])
+    prompt = (
+        f"You are a financial analyst. For the company with ticker '{ticker}', "
+        f"generate 10 additional specific keywords or short phrases (comma-separated) "
+        f"that would appear in SEC filings, job postings, or analyst reports when "
+        f"evaluating the '{category}' dimension. "
+        f"Base keywords: {', '.join(base_keywords)}. "
+        f"Return ONLY the comma-separated keywords, nothing else."
+    )
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.post(
+                GROQ_API_URL,
+                headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
+                json={
+                    "model": GROQ_MODEL,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "max_tokens": 200,
+                    "temperature": 0.3,
+                },
+            )
+            resp.raise_for_status()
+            text = resp.json()["choices"][0]["message"]["content"].strip()
+            expanded = [kw.strip() for kw in text.split(",") if kw.strip()]
+            return list(set(base_keywords + expanded))
+    except Exception as e:
+        logger.warning("groq_keyword_expansion_failed ticker=%s category=%s error=%s", ticker, category, e)
+        return base_keywords
+
+
+async def get_groq_signal_summary(ticker: str, category: str, raw_data: Dict[str, Any]) -> Optional[str]:
+    """
+    Use Groq to generate a short natural language summary of a signal result.
+    Returns None if Groq is unavailable.
+    """
+    if not GROQ_API_KEY:
+        return None
+    prompt = (
+        f"Summarize the following {category} signal data for ticker '{ticker}' "
+        f"in 2-3 sentences for an investment committee memo. "
+        f"Data: {json.dumps(raw_data, default=str)[:1500]}"
+    )
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.post(
+                GROQ_API_URL,
+                headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
+                json={
+                    "model": GROQ_MODEL,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "max_tokens": 300,
+                    "temperature": 0.4,
+                },
+            )
+            resp.raise_for_status()
+            return resp.json()["choices"][0]["message"]["content"].strip()
+    except Exception as e:
+        logger.warning("groq_summary_failed ticker=%s category=%s error=%s", ticker, category, e)
+        return None
 
 
 class CS2Client:
@@ -280,6 +386,36 @@ class CS2Client:
                         fiscal_year=chunk.get("fiscal_year"),
                     ))
         return results
+
+    # ------------------------------------------------------------------
+    # Groq-enhanced async methods
+    # ------------------------------------------------------------------
+
+    async def get_keywords_for_category(self, ticker: str, category: str) -> List[str]:
+        """Groq-expanded keywords for a signal category; falls back to static list."""
+        return await expand_keywords_with_groq(ticker, category)
+
+    async def get_full_evidence_with_keywords(self, ticker: str, category: str) -> Dict[str, Any]:
+        """Evidence from S3 for ticker/category + Groq-expanded keywords + IC summary.
+
+        Returns: {ticker, category, keywords, evidence, groq_summary}
+        """
+        evidence = self.get_evidence(
+            ticker=ticker,
+            signal_categories=[category] if category else None,
+        )
+        keywords = await expand_keywords_with_groq(ticker, category)
+        summary = await get_groq_signal_summary(ticker, category, {
+            "evidence_count": len(evidence),
+            "category": category,
+        })
+        return {
+            "ticker": ticker.upper(),
+            "category": category,
+            "keywords": keywords,
+            "evidence": evidence,
+            "groq_summary": summary,
+        }
 
     # ------------------------------------------------------------------
     # Helpers

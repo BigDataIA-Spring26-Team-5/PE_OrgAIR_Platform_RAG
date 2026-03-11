@@ -1,9 +1,20 @@
 """CS3 Client — Scores and rubric data from the PE Org-AI-R platform."""
 from __future__ import annotations
 
+import json
+import logging
+import os
+from enum import Enum
+
 import httpx
 from dataclasses import dataclass, field
-from typing import List, Optional, Dict
+from typing import Any, Dict, List, Optional, Tuple
+
+logger = logging.getLogger(__name__)
+
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+GROQ_MODEL = "llama-3.1-8b-instant"
+GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
 
 DIMENSIONS = [
     "data_infrastructure",
@@ -22,6 +33,276 @@ SCORE_LEVELS = {
     4: ("Good", 60, 79),
     5: ("Excellent", 80, 100),
 }
+
+
+# ---------------------------------------------------------------------------
+# Enums
+# ---------------------------------------------------------------------------
+
+class Dimension(str, Enum):
+    """The 7 V^R dimensions from CS3."""
+    DATA_INFRASTRUCTURE = "data_infrastructure"
+    AI_GOVERNANCE = "ai_governance"
+    TECHNOLOGY_STACK = "technology_stack"
+    TALENT = "talent"
+    LEADERSHIP = "leadership"
+    USE_CASE_PORTFOLIO = "use_case_portfolio"
+    CULTURE = "culture"
+
+
+class ScoreLevel(int, Enum):
+    """Score levels (1–5)."""
+    LEVEL_5 = 5  # 80-100 Excellent
+    LEVEL_4 = 4  # 60-79  Good
+    LEVEL_3 = 3  # 40-59  Adequate
+    LEVEL_2 = 2  # 20-39  Developing
+    LEVEL_1 = 1  # 0-19   Nascent
+
+    @property
+    def name_label(self) -> str:
+        return {5: "Excellent", 4: "Good", 3: "Adequate", 2: "Developing", 1: "Nascent"}[self.value]
+
+    @property
+    def score_range(self) -> Tuple[int, int]:
+        return {5: (80, 100), 4: (60, 79), 3: (40, 59), 2: (20, 39), 1: (0, 19)}[self.value]
+
+
+class AssessmentStatus(str, Enum):
+    DRAFT = "draft"
+    IN_PROGRESS = "in_progress"
+    SUBMITTED = "submitted"
+    APPROVED = "approved"
+    SUPERSEDED = "superseded"
+
+
+class AssessmentType(str, Enum):
+    INITIAL = "initial"
+    FOLLOW_UP = "follow_up"
+    ANNUAL = "annual"
+
+
+# ---------------------------------------------------------------------------
+# GroqScoreEstimate dataclass
+# ---------------------------------------------------------------------------
+
+@dataclass
+class GroqScoreEstimate:
+    """Groq-generated score estimate for a missing/zero dimension."""
+    dimension: str
+    ticker: str
+    estimated_score: float
+    level: int
+    level_name: str
+    rationale: str
+    confidence: float  # Groq's self-reported confidence (0–1)
+    keywords: List[str]
+
+
+# ---------------------------------------------------------------------------
+# Static rubric / keyword data
+# ---------------------------------------------------------------------------
+
+_RUBRIC_TEXT: Dict[str, Dict[int, str]] = {
+    "data_infrastructure": {
+        5: "Enterprise-grade, real-time data platform with ML-ready pipelines and data governance.",
+        4: "Robust data warehouse with good pipeline coverage and partial ML readiness.",
+        3: "Functional data infrastructure with some gaps in pipeline automation.",
+        2: "Basic data storage with limited pipeline automation.",
+        1: "Minimal or ad-hoc data infrastructure; no ML-ready pipelines.",
+    },
+    "ai_governance": {
+        5: "Comprehensive AI ethics framework, model governance, and regulatory compliance.",
+        4: "Formal AI governance policies with bias monitoring and explainability practices.",
+        3: "Some AI governance in place; policies defined but inconsistently applied.",
+        2: "Ad-hoc AI oversight; limited formal governance structure.",
+        1: "No formal AI governance or ethics framework.",
+    },
+    "technology_stack": {
+        5: "Best-in-class cloud-native ML platform with full MLOps and CI/CD for models.",
+        4: "Modern cloud stack with MLOps tooling and containerised deployments.",
+        3: "Cloud adoption with partial MLOps; some manual deployment steps.",
+        2: "Hybrid on-premise/cloud with limited ML tooling.",
+        1: "Legacy on-premise stack with no ML infrastructure.",
+    },
+    "talent": {
+        5: "Deep AI/ML talent pool with specialised researchers and broad skills coverage.",
+        4: "Strong data science and ML engineering team with diverse skills.",
+        3: "Adequate ML team; some skill gaps in emerging areas.",
+        2: "Small ML team; heavy reliance on a few individuals.",
+        1: "Minimal AI talent; no dedicated ML roles.",
+    },
+    "leadership": {
+        5: "C-suite AI champion with published strategy, dedicated AI budget, and innovation labs.",
+        4: "Strong executive sponsorship of AI with a defined roadmap.",
+        3: "AI strategy exists but leadership engagement is inconsistent.",
+        2: "Limited leadership visibility on AI initiatives.",
+        1: "No clear AI strategy or executive sponsorship.",
+    },
+    "use_case_portfolio": {
+        5: "Broad portfolio of production AI use cases generating measurable business value.",
+        4: "Several production AI use cases with clear ROI.",
+        3: "Mix of production and pilot AI use cases.",
+        2: "A few pilot AI projects; limited production deployments.",
+        1: "Exploratory AI discussions only; no production use cases.",
+    },
+    "culture": {
+        5: "Data-driven culture embedded across all functions; continuous experimentation norm.",
+        4: "Strong data-driven culture with active AI adoption programmes.",
+        3: "Growing data culture; AI adoption varies across business units.",
+        2: "Emerging data awareness; limited AI culture.",
+        1: "Traditional culture; resistance to data-driven decision making.",
+    },
+}
+
+_BASE_KEYWORDS: Dict[str, List[str]] = {
+    "data_infrastructure": ["data lake", "data warehouse", "ETL", "data pipeline", "real-time data", "cloud storage"],
+    "ai_governance": ["AI ethics", "model governance", "responsible AI", "bias detection", "explainability", "AI policy"],
+    "technology_stack": ["machine learning platform", "MLOps", "Kubernetes", "cloud-native", "microservices", "API gateway"],
+    "talent": ["machine learning engineer", "data scientist", "AI researcher", "NLP", "computer vision", "deep learning"],
+    "leadership": ["Chief AI Officer", "AI strategy", "digital transformation", "technology roadmap", "innovation lab"],
+    "use_case_portfolio": ["AI use case", "automation", "predictive analytics", "recommendation system", "computer vision"],
+    "culture": ["data-driven", "experimentation", "agile", "innovation culture", "AI adoption", "continuous learning"],
+}
+
+_DIM_ALIAS_MAP: Dict[str, str] = {
+    "data_infrastructure": "data_infrastructure",
+    "ai_governance": "ai_governance",
+    "technology_stack": "technology_stack",
+    "talent": "talent",
+    "talent_skills": "talent",
+    "leadership": "leadership",
+    "leadership_vision": "leadership",
+    "use_case_portfolio": "use_case_portfolio",
+    "culture": "culture",
+    "culture_change": "culture",
+}
+
+
+# ---------------------------------------------------------------------------
+# Groq async helpers (module-level)
+# ---------------------------------------------------------------------------
+
+async def _groq_post(prompt: str, max_tokens: int = 300, temperature: float = 0.3) -> Optional[str]:
+    """Call Groq and return the response text, or None on failure."""
+    if not GROQ_API_KEY:
+        return None
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            resp = await client.post(
+                GROQ_API_URL,
+                headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
+                json={
+                    "model": GROQ_MODEL,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "max_tokens": max_tokens,
+                    "temperature": temperature,
+                },
+            )
+            resp.raise_for_status()
+            return resp.json()["choices"][0]["message"]["content"].strip()
+    except Exception as e:
+        logger.warning("groq_call_failed: %s", e)
+        return None
+
+
+async def expand_keywords(ticker: str, dimension_name: str) -> List[str]:
+    """
+    Expand base keywords for a dimension using Groq, company-specific context.
+    Falls back to static base keywords if Groq is unavailable.
+    """
+    norm = _DIM_ALIAS_MAP.get(dimension_name, dimension_name)
+    base = _BASE_KEYWORDS.get(norm, [])
+    prompt = (
+        f"You are a PE analyst. For '{ticker}', list 10 additional keywords/phrases "
+        f"(comma-separated) that appear in SEC filings, earnings calls, or analyst reports "
+        f"when evaluating the '{dimension_name}' AI-readiness dimension. "
+        f"Base keywords: {', '.join(base)}. "
+        f"Return ONLY comma-separated keywords."
+    )
+    text = await _groq_post(prompt, max_tokens=200)
+    if not text:
+        return base
+    expanded = [k.strip() for k in text.split(",") if k.strip()]
+    return list(set(base + expanded))
+
+
+async def estimate_missing_score(ticker: str, dimension_name: str, company_name: str = "") -> GroqScoreEstimate:
+    """
+    When a dimension has no evidence (score=0, evidence_count=0), use Groq to
+    generate a plausible score estimate from public knowledge about the company.
+    """
+    norm = _DIM_ALIAS_MAP.get(dimension_name, dimension_name)
+    dim_label = dimension_name.replace("_", " ").title()
+    name_hint = f"({company_name})" if company_name else ""
+    rubric_data = _RUBRIC_TEXT.get(norm, {})
+    prompt = (
+        f"You are a senior PE analyst assessing AI readiness. "
+        f"For the company with ticker '{ticker}' {name_hint}, estimate a score (0–100) "
+        f"for the '{dim_label}' dimension based on publicly available information. "
+        f"Respond in this exact JSON format:\n"
+        f'{{"score": <0-100>, "confidence": <0.0-1.0>, "rationale": "<2-3 sentences>", '
+        f'"keywords": ["kw1", "kw2", "kw3", "kw4", "kw5"]}}\n'
+        f"Base your estimate on the rubric: {json.dumps(rubric_data)}"
+    )
+    text = await _groq_post(prompt, max_tokens=400, temperature=0.4)
+    estimated_score = 0.0
+    confidence = 0.3
+    rationale = "Groq unavailable — score estimated as 0."
+    keywords: List[str] = _BASE_KEYWORDS.get(norm, [])
+
+    if text:
+        try:
+            json_str = text
+            if "```" in text:
+                json_str = text.split("```")[1].lstrip("json").strip()
+            data = json.loads(json_str)
+            estimated_score = float(data.get("score", 0))
+            confidence = float(data.get("confidence", 0.3))
+            rationale = str(data.get("rationale", ""))
+            keywords = data.get("keywords", keywords)
+        except Exception:
+            import re
+            m = re.search(r'"score"\s*:\s*([\d.]+)', text)
+            if m:
+                estimated_score = float(m.group(1))
+            rationale = text[:300]
+
+    level, level_name = score_to_level(estimated_score)
+    return GroqScoreEstimate(
+        dimension=dimension_name,
+        ticker=ticker,
+        estimated_score=estimated_score,
+        level=level,
+        level_name=level_name,
+        rationale=rationale,
+        confidence=confidence,
+        keywords=keywords,
+    )
+
+
+async def enrich_company_fields(ticker: str, company_name: str) -> Dict[str, Any]:
+    """
+    Use Groq to fill in missing company metadata fields
+    (sector, sub_sector, revenue, employee_count, fiscal_year_end).
+    """
+    prompt = (
+        f"For the public company with ticker '{ticker}' (name: '{company_name}'), "
+        f"provide the following in JSON format:\n"
+        f'{{"sector": "<sector>", "sub_sector": "<sub_sector>", '
+        f'"revenue_millions": <number or null>, "employee_count": <integer or null>, '
+        f'"fiscal_year_end": "<MM-DD or null>"}}\n'
+        f"Use your knowledge of the company. Return ONLY valid JSON."
+    )
+    text = await _groq_post(prompt, max_tokens=200, temperature=0.2)
+    if not text:
+        return {}
+    try:
+        json_str = text
+        if "```" in text:
+            json_str = text.split("```")[1].lstrip("json").strip()
+        return json.loads(json_str)
+    except Exception:
+        return {}
 
 
 def score_to_level(score: float) -> tuple[int, str]:
@@ -198,6 +479,54 @@ class CS3Client:
                     )
                 )
         return results
+
+    # -----------------------------------------------------------------------
+    # Groq-enhanced async methods
+    # -----------------------------------------------------------------------
+
+    async def get_dimension_keywords(self, ticker: str, dimension_name: str) -> List[str]:
+        """Platform endpoint first → local Groq fallback."""
+        try:
+            resp = self._client.get(
+                f"{self.base_url}/companies/{ticker.upper()}/dimension-keywords",
+                params={"dimension": dimension_name},
+            )
+            if resp.status_code == 200:
+                return resp.json().get("keywords", [])
+        except Exception:
+            pass
+        return await expand_keywords(ticker, dimension_name)
+
+    async def get_all_dimension_estimates(self, ticker: str) -> Dict[str, GroqScoreEstimate]:
+        """Groq estimates for all 7 dimensions."""
+        company_name = ""
+        try:
+            assessment = self.get_assessment(ticker)
+            if assessment:
+                company_name = assessment.ticker
+        except Exception:
+            pass
+        results: Dict[str, GroqScoreEstimate] = {}
+        for dim in DIMENSIONS:
+            results[dim] = await estimate_missing_score(ticker, dim, company_name)
+        return results
+
+    async def get_enriched_company(self, ticker: str) -> Optional[Any]:
+        """Company assessment + Groq-filled missing metadata fields (does not write back)."""
+        try:
+            company = self.get_assessment(ticker)
+        except Exception:
+            return None
+        if company and not any([
+            getattr(company, "sector", None),
+            getattr(company, "revenue_millions", None),
+            getattr(company, "employee_count", None),
+        ]):
+            enriched = await enrich_company_fields(ticker, ticker)
+            for attr in ("sector", "sub_sector", "revenue_millions", "employee_count", "fiscal_year_end"):
+                if enriched.get(attr) and hasattr(company, attr):
+                    setattr(company, attr, enriched[attr])
+        return company
 
     def close(self):
         self._client.close()
