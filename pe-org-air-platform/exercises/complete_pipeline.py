@@ -9,6 +9,7 @@ Run from pe-org-air-platform/:
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import sys
 
@@ -31,7 +32,8 @@ def run_pipeline(ticker: str = "NVDA", dimension: str = "data_infrastructure"):
     # ── Step 1: CS1 — Company Lookup ─────────────────────────────
     print("[1/6] Fetching company metadata from CS1...")
     cs1 = CS1Client()
-    company = cs1.get_company(ticker)
+    # company = cs1.get_company(ticker)
+    company = asyncio.run(cs1.get_company(ticker))
     if company:
         print(f"  Found: {company.name} ({company.ticker})")
         print(f"    Sector: {company.sector} | Revenue: ${company.revenue_millions:.0f}M")
