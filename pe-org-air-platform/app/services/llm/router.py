@@ -1,3 +1,4 @@
+# # app/services/llm/router.py
 # """LLM Router — LiteLLM multi-provider router (Groq + DeepSeek).
 
 # NOTE: Currently using Groq + DeepSeek for testing/development.
@@ -8,17 +9,16 @@
 #         3. Comment out the TESTING routing block below
 #         That's it — LiteLLM handles the rest.
 # """
-# """LLM Router — LiteLLM multi-provider router (Groq + DeepSeek)..."""
-# from __future__ import annotations
-
-# import os
-# os.environ['LITELLM_LOCAL_MODEL_COST_MAP'] = 'True' 
 # from __future__ import annotations
 
 # import os
 # import time
 # from dataclasses import dataclass, field
 # from typing import AsyncIterator, List, Dict, Any, Optional
+
+# # Fix for LiteLLM hanging on import on Windows
+# # Must be set BEFORE importing litellm
+# os.environ['LITELLM_LOCAL_MODEL_COST_MAP'] = 'True'
 
 # try:
 #     import litellm
@@ -218,6 +218,7 @@
 #         user_msg = next((m["content"] for m in messages if m["role"] == "user"), "")
 #         return f"[{model} stub] Response to: {user_msg[:100]}..."
 
+# app/services/llm/router.py
 """LLM Router — LiteLLM multi-provider router (Groq + DeepSeek).
 
 NOTE: Currently using Groq + DeepSeek for testing/development.
@@ -261,6 +262,10 @@ _TASK_ROUTING: Dict[str, tuple[str, str]] = {
     "justification_generation": ("deepseek/deepseek-chat", "groq/llama-3.1-8b-instant"),
     "ic_summary":               ("deepseek/deepseek-chat", "groq/llama-3.1-8b-instant"),
     "chat_response":            ("deepseek/deepseek-chat", "groq/llama-3.1-8b-instant"),
+
+    # Tech stack LLM fallback — used by tech_signals.py when BuiltWith/Wappalyzer return 0
+    # TODO: SWITCH TO CLAUDE — in production block below this routes to Claude Sonnet instead
+    "tech_stack_fallback":      ("groq/llama-3.1-8b-instant", "deepseek/deepseek-chat"),
 }
 
 # ---------------------------------------------------------------------------
@@ -278,6 +283,9 @@ _TASK_ROUTING: Dict[str, tuple[str, str]] = {
 #     "justification_generation": ("claude-sonnet-4-20250514", "groq/llama-3.1-8b-instant"),
 #     "ic_summary":               ("claude-sonnet-4-20250514", "groq/llama-3.1-8b-instant"),
 #     "chat_response":            ("claude-haiku-4-5-20251001", "groq/llama-3.1-8b-instant"),
+#
+#     # Tech stack LLM fallback — Claude Sonnet has strongest company tech stack knowledge
+#     "tech_stack_fallback":      ("claude-sonnet-4-20250514", "groq/llama-3.1-8b-instant"),
 # }
 # ---------------------------------------------------------------------------
 
