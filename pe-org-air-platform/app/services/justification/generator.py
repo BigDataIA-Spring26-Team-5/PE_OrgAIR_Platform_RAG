@@ -11,31 +11,7 @@ logger = logging.getLogger(__name__)
 from app.services.integration.cs3_client import CS3Client, DimensionScore, RubricCriteria
 from app.services.retrieval.hybrid import HybridRetriever, RetrievedDocument
 from app.services.llm.router import ModelRouter
-
-JUSTIFICATION_PROMPT = """You are a senior private equity analyst preparing an Investment Committee brief.
-
-Company: {company_id}
-Dimension: {dimension}
-Score: {score}/100 (Level {level} — {level_name})
-Confidence Interval: [{ci_low:.1f}, {ci_high:.1f}]
-
-Rubric Criteria for Level {level}:
-{rubric_criteria}
-
-Supporting Evidence ({n_evidence} pieces):
-{evidence_text}
-
-Evidence Gaps (criteria not yet met for Level {next_level}):
-{gaps_text}
-
-Write a 150–200 word IC-ready justification paragraph that:
-1. States the score and level clearly
-2. Cites 2–3 specific evidence pieces with source references
-3. Explains what is driving the score
-4. Notes key gaps that would push to the next level
-5. Uses precise, professional PE investment language
-
-Justification:"""
+from app.prompts.rag_prompts import JUSTIFICATION_SYSTEM, JUSTIFICATION_TEMPLATE
 
 
 @dataclass
@@ -129,7 +105,7 @@ class JustificationGenerator:
             "LLM evidence_text for %s/%s (%d pieces):\n%s",
             ticker, dimension, len(cited), evidence_text
         )
-        prompt = JUSTIFICATION_PROMPT.format(
+        prompt = JUSTIFICATION_TEMPLATE.format(
             company_id=ticker,
             dimension=dimension,
             score=dim_score.score,
@@ -144,15 +120,7 @@ class JustificationGenerator:
             next_level=next_level,
         )
         messages = [
-            {
-                "role": "system",
-                "content": (
-                    "You are a senior PE investment analyst. "
-                    "Answer ONLY using the evidence provided in the prompt below. "
-                    "Do not use outside knowledge. If the evidence does not support a claim, "
-                    "state explicitly that evidence is insufficient."
-                ),
-            },
+            {"role": "system", "content": JUSTIFICATION_SYSTEM},
             {"role": "user", "content": prompt},
         ]
         try:

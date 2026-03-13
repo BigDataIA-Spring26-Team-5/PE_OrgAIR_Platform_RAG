@@ -17,6 +17,12 @@ from app.services.retrieval.hyde import HyDERetriever
 from app.services.justification.generator import JustificationGenerator
 from app.services.workflows.ic_prep import ICPrepWorkflow
 from app.services.llm.router import ModelRouter
+from app.prompts.rag_prompts import (
+    DIM_DETECTION_SYSTEM,
+    DIM_DETECTION_USER,
+    CHATBOT_SYSTEM,
+    CHATBOT_USER,
+)
 import structlog
 
 logger = structlog.get_logger(__name__)
@@ -187,21 +193,15 @@ def _detect_dimension_with_llm(
     messages = [
         {
             "role": "system",
-            "content": (
-                "You are a PE investment analyst. Your job is to classify investment "
-                "committee questions into AI readiness dimensions.\n"
-                "Respond with ONLY the dimension key — no explanation, no punctuation.\n"
-                "Valid dimension keys:\n"
-                + "\n".join(f"  {d}" for d in valid_dims)
+            "content": DIM_DETECTION_SYSTEM.format(
+                valid_dims="\n".join(f"  {d}" for d in valid_dims)
             ),
         },
         {
             "role": "user",
-            "content": (
-                f"Question: {question}\n\n"
-                f"Dimension definitions:\n{dim_list}\n\n"
-                "Which single dimension best matches this question? "
-                "Reply with only the dimension key."
+            "content": DIM_DETECTION_USER.format(
+                question=question,
+                dim_list=dim_list,
             ),
         },
     ]
@@ -928,31 +928,14 @@ async def chatbot_query(
     messages = [
         {
             "role": "system",
-            "content": (
-                "You are a senior PE investment analyst preparing IC materials. "
-                "Answer questions about companies based ONLY on the provided evidence excerpts. "
-                "Rules:\n"
-                "1. Always cite source type and section when referencing evidence "
-                "(e.g., 'per SEC 10-K Item 1' or 'per the 2024 DEF 14A proxy').\n"
-                "2. For gap/risk/weakness questions: companies do not self-report weaknesses. "
-                "Instead, analyze disclosed risk factors and competitive threats as evidence "
-                "of strategic gaps. Regulatory risks, competitive pressures, and talent "
-                "concentration are all legitimate gaps.\n"
-                "3. For broad readiness questions: synthesize across all evidence types "
-                "— SEC filings, job postings, Glassdoor reviews — to give a balanced view.\n"
-                "4. Be specific and quantitative where evidence supports it.\n"
-                "5. If evidence is insufficient, say exactly what IS present and what "
-                "additional evidence would be needed."
-                + dim_instruction
-            ),
+            "content": CHATBOT_SYSTEM + dim_instruction,
         },
         {
             "role": "user",
-            "content": (
-                f"Company: {ticker}\n\n"
-                f"Evidence excerpts:\n{context}\n\n"
-                f"Question: {question}\n\n"
-                "Provide a 3-4 sentence IC-quality answer with specific citations:"
+            "content": CHATBOT_USER.format(
+                ticker=ticker,
+                context=context,
+                question=question,
             ),
         },
     ]

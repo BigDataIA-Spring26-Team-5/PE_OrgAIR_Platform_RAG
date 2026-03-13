@@ -12,6 +12,7 @@ from datetime import datetime
 import httpx
 
 from app.utils.id_utils import stable_evidence_id
+from app.prompts.rag_prompts import CS2_KEYWORD_EXPANSION_USER, CS2_SIGNAL_SUMMARY_USER
 
 logger = logging.getLogger(__name__)
 
@@ -196,13 +197,10 @@ async def expand_keywords_with_groq(ticker: str, category: str) -> List[str]:
         return SIGNAL_KEYWORDS.get(category, [])
 
     base_keywords = SIGNAL_KEYWORDS.get(category, [])
-    prompt = (
-        f"You are a financial analyst. For the company with ticker '{ticker}', "
-        f"generate 10 additional specific keywords or short phrases (comma-separated) "
-        f"that would appear in SEC filings, job postings, or analyst reports when "
-        f"evaluating the '{category}' dimension. "
-        f"Base keywords: {', '.join(base_keywords)}. "
-        f"Return ONLY the comma-separated keywords, nothing else."
+    prompt = CS2_KEYWORD_EXPANSION_USER.format(
+        ticker=ticker,
+        category=category,
+        base_keywords=", ".join(base_keywords),
     )
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
@@ -232,10 +230,10 @@ async def get_groq_signal_summary(ticker: str, category: str, raw_data: Dict[str
     """
     if not GROQ_API_KEY:
         return None
-    prompt = (
-        f"Summarize the following {category} signal data for ticker '{ticker}' "
-        f"in 2-3 sentences for an investment committee memo. "
-        f"Data: {json.dumps(raw_data, default=str)[:1500]}"
+    prompt = CS2_SIGNAL_SUMMARY_USER.format(
+        category=category,
+        ticker=ticker,
+        data=json.dumps(raw_data, default=str)[:1500],
     )
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
