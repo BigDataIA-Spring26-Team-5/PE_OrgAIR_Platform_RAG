@@ -45,9 +45,39 @@ services:
     networks:
       - pe_orgair_network
 
+# Airflow Orchestrator
+  airflow:
+    image: apache/airflow:2.9.3
+    container_name: pe_orgair_platform_airflow
+    depends_on:
+      - redis
+      - api
+    ports:
+      - "8080:8080"
+    environment:
+      - AIRFLOW__CORE__DAGS_FOLDER=/opt/airflow/dags
+      - AIRFLOW__CORE__LOAD_EXAMPLES=False
+      - AIRFLOW__WEBSERVER__SECRET_KEY=pe-platform-secret
+      - _AIRFLOW_WWW_USER_CREATE=true
+      - _AIRFLOW_WWW_USER_USERNAME=admin
+      - _AIRFLOW_WWW_USER_PASSWORD=admin
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - airflow_data:/opt/airflow
+    command: >
+      bash -c "airflow standalone &
+               sleep 20 &&
+               airflow users reset-password -u admin -p admin &&
+               wait"
+    restart: unless-stopped
+    networks:
+      - pe_orgair_networkk
+
 networks:
   pe_orgair_network:
     driver: bridge
 
 volumes:
   redis_data:
+  airflow_data:
+    name: pe_rag_airflow
