@@ -10,7 +10,7 @@ NO local file storage. NO job-posting-derived tech data.
 """
 import logging
 from datetime import datetime, timezone
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from app.pipelines.tech_signals import TechStackCollector, TechStackResult
 from app.services.base_signal_service import BaseSignalService
@@ -34,11 +34,18 @@ class TechSignalService(BaseSignalService):
         self.company_repo = CompanyRepository()
         self.signal_repo = get_signal_repository()
 
+    # async def _collect(self, ticker: str, company_id: str, company: dict, **kwargs) -> dict:
+    #     result: TechStackResult = await self.collector.analyze_company(
+    #         company_id=company_id,
+    #         ticker=ticker,
+    #         company_name=company.get("name"),
+    #     )
     async def _collect(self, ticker: str, company_id: str, company: dict, **kwargs) -> dict:
         result: TechStackResult = await self.collector.analyze_company(
             company_id=company_id,
             ticker=ticker,
             company_name=company.get("name"),
+            website=kwargs.get("website"),   # ← forward from kwargs
         )
         self._store_to_s3(ticker, result)
 
@@ -95,13 +102,20 @@ class TechSignalService(BaseSignalService):
             "errors": result["errors"],
         }
 
-    async def analyze_company(self, ticker: str, force_refresh: bool = False) -> Dict[str, Any]:
+    # async def analyze_company(self, ticker: str, force_refresh: bool = False) -> Dict[str, Any]:
+    async def analyze_company(
+        self,
+        ticker: str,
+        force_refresh: bool = False,
+        website: Optional[str] = None,    # ← add this
+    ) -> Dict[str, Any]:
         ticker = ticker.upper()
         logger.info("=" * 60)
         logger.info(f"🌐 ANALYZING DIGITAL PRESENCE FOR: {ticker}")
         logger.info("=" * 60)
         try:
-            result = await super().analyze_company(ticker)
+            # result = await super().analyze_company(ticker)
+            result = await super().analyze_company(ticker, website=website)  # ← add this
             logger.info("=" * 60)
             logger.info(f"📊 DIGITAL PRESENCE COMPLETE: {ticker}")
             logger.info("=" * 60)
