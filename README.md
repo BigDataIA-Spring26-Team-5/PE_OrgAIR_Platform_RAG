@@ -88,11 +88,11 @@ CS1 through CS3 built a working AI readiness assessment platform for private equ
 
 ### Target Companies
 
-The platform is preconfigured with 20 publicly traded companies across five sectors, representing a realistic PE portfolio for benchmarking, **but configured to also take in any ticker from the user**:
+The platform is preconfigured with few publicly traded companies across five sectors, representing a realistic PE portfolio for benchmarking, **but configured to also take in any ticker from the user**:
 
 | Sector | Tickers |
 |:---|:---|
-| Technology | NVDA, AAPL, MSFT, GOOGL, AMZN, META, TSLA, IBM, ORCL, CRM |
+| Technology | NVDA, AAPL, MSFT, GOOGL, CRM |
 | Manufacturing | CAT, DE, GE |
 | Retail | WMT, TGT, DG |
 | Healthcare | UNH, HCA |
