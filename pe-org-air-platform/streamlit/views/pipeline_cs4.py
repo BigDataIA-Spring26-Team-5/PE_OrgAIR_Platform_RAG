@@ -211,16 +211,7 @@ def _get_completed_steps(ticker: str) -> set[int]:
         culture_cats = {"culture", "culture_signals", "glassdoor", "glassdoor_reviews"}
         if signal_categories & culture_cats:
             completed.add(5)
-    # Fallback 2: check the glassdoor-specific endpoint (data in S3)
-    if 5 not in completed:
-        try:
-            r = requests.get(f"{BASE_URL}/api/v1/glassdoor-signals/{ticker}")
-            if r.status_code == 200:
-                gd = r.json()
-                if gd.get("overall_score") and gd["overall_score"] > 0:
-                    completed.add(5)
-        except Exception:
-            pass
+    # NO further fallback — don't check S3 endpoint as it can return stale/cross-company data
 
     # Step 6 — board governance
     # Check signal_summary first
@@ -236,16 +227,7 @@ def _get_completed_steps(ticker: str) -> set[int]:
         board_cats = {"board_governance", "board_composition", "governance_signals"}
         if signal_categories & board_cats:
             completed.add(6)
-    # Fallback 2: check the board-governance-specific endpoint (data in S3)
-    if 6 not in completed:
-        try:
-            r = requests.get(f"{BASE_URL}/api/v1/board-governance/score/{ticker}")
-            if r.status_code == 200:
-                bg = r.json()
-                if bg.get("governance_score") and bg["governance_score"] > 0:
-                    completed.add(6)
-        except Exception:
-            pass
+    # NO further fallback — don't check S3 endpoint as it can return stale/cross-company data
 
     # Step 7 — dimension scores exist
     try:

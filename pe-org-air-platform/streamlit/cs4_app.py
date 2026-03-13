@@ -180,22 +180,23 @@ footer { visibility: hidden; }
 }
 
 /* ===== Chat bubbles ===== */
-.msg-user-wrap { text-align: right; margin-bottom: 12px; }
+.msg-user-wrap { text-align: right; margin-bottom: 14px; }
 .bubble-user {
-  display: inline-block; padding: 10px 14px; border-radius: 10px;
-  font-size: 13px; line-height: 1.6; max-width: 85%;
+  display: inline-block; padding: 12px 16px; border-radius: 12px;
+  font-size: 15px; line-height: 1.7; max-width: 85%;
   background: #4F46E5; color: #fff;
 }
 .bubble-ai {
-  display: inline-block; padding: 10px 14px; border-radius: 10px;
-  font-size: 13px; line-height: 1.6; max-width: 85%;
+  display: inline-block; padding: 12px 16px; border-radius: 12px;
+  font-size: 15px; line-height: 1.7; max-width: 90%;
   border: 1px solid rgba(128,128,128,0.2);
 }
-.bubble-thinking { font-style: italic; opacity: 0.5; font-size: 12px; }
+.bubble-thinking { font-style: italic; opacity: 0.5; font-size: 13px; }
 .cite-tag {
-  display: inline; padding: 1px 5px; border-radius: 3px; font-size: 10px;
+  display: inline; padding: 3px 8px; border-radius: 4px; font-size: 12px;
   background: rgba(79,70,229,0.1); color: #4F46E5;
-  margin-left: 2px; border: 1px solid rgba(79,70,229,0.2);
+  margin-left: 3px; border: 1px solid rgba(79,70,229,0.2);
+  font-weight: 500;
 }
 
 /* ===== Suggested questions — SMALLER pills ===== */
@@ -207,21 +208,21 @@ footer { visibility: hidden; }
 /* ===== Evidence panel ===== */
 .ev-header {
   padding: 12px 14px; border-bottom: 1px solid rgba(128,128,128,0.15);
-  font-size: 11px; font-weight: 600; opacity: 0.7;
+  font-size: 13px; font-weight: 600; opacity: 0.7;
 }
 .ev-card {
   border: 1px solid rgba(128,128,128,0.2); border-radius: 7px;
-  padding: 9px 11px; margin-bottom: 7px;
+  padding: 10px 12px; margin-bottom: 8px;
 }
-.ev-top    { display: flex; align-items: center; gap: 5px; margin-bottom: 5px; }
-.src-badge { font-size: 9px; padding: 2px 6px; border-radius: 20px; font-weight: 600; }
+.ev-top    { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
+.src-badge { font-size: 11px; padding: 3px 8px; border-radius: 20px; font-weight: 600; }
 .src-sec   { background: #f0fdf4; color: #15803d; border: 1px solid #86efac; }
 .src-job   { background: #fffbeb; color: #92400e; border: 1px solid #fcd34d; }
 .src-gd    { background: rgba(128,128,128,0.08); color: #6b7280; border: 1px solid rgba(128,128,128,0.2); }
 .src-proxy { background: #eff6ff; color: #1e40af; border: 1px solid #93c5fd; }
-.ev-score   { margin-left: auto; font-size: 9px; opacity: 0.45; }
-.ev-section { font-size: 10px; opacity: 0.65; margin-bottom: 3px; font-weight: 500; }
-.ev-snippet { font-size: 11px; line-height: 1.5; opacity: 0.8; }
+.ev-score   { margin-left: auto; font-size: 11px; opacity: 0.45; }
+.ev-section { font-size: 12px; opacity: 0.65; margin-bottom: 4px; font-weight: 500; }
+.ev-snippet { font-size: 13px; line-height: 1.6; opacity: 0.8; }
 
 [data-testid="column"] { padding-left: 4px !important; padding-right: 4px !important; }
 
