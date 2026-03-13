@@ -261,11 +261,17 @@ def _enrich_company_in_background(company_id: UUID, ticker: str, name: str, comp
 
 def _resolve_and_backfill_ticker(ticker: str, company_repo: CompanyRepository) -> BackfillResult:
     """Resolve ticker via yfinance (app.utils.company_resolver) and upsert into Snowflake.
-    Only fills NULL columns — never overwrites existing data.
+    Overwrites enriched columns with the latest yfinance data.
     """
     from app.utils.company_resolver import resolve_company
     try:
         resolved = resolve_company(ticker)
+
+        # Fail early if yfinance didn't return usable data
+        if resolved.resolved_from != "yfinance":
+            msg = "; ".join(resolved.warnings) if resolved.warnings else f"yfinance returned no data for {ticker}"
+            return BackfillResult(ticker=ticker, status="failed", message=msg)
+
         existing = company_repo.get_by_ticker(resolved.ticker)
 
         if existing is None:
@@ -288,20 +294,19 @@ def _resolve_and_backfill_ticker(ticker: str, company_repo: CompanyRepository) -
                 message=f"Created (confidence={resolved.confidence})",
             )
 
-        # Exists — only fill NULL enriched columns
+        # Exists — overwrite all enriched columns with fresh yfinance data
         updates = {}
         for field_name in ["sector", "sub_sector", "market_cap_percentile",
                            "revenue_millions", "employee_count", "fiscal_year_end"]:
-            if existing.get(field_name) is None:
-                val = getattr(resolved, field_name)
-                if val is not None:
-                    updates[field_name] = val
+            val = getattr(resolved, field_name)
+            if val is not None:
+                updates[field_name] = val
 
         if not updates:
             return BackfillResult(
                 ticker=resolved.ticker, status="skipped",
                 company=row_to_response(existing),
-                message="All enriched fields already populated",
+                message="yfinance returned no enriched fields",
             )
 
         company_id = UUID(str(existing["id"]))
@@ -311,7 +316,7 @@ def _resolve_and_backfill_ticker(ticker: str, company_repo: CompanyRepository) -
         return BackfillResult(
             ticker=resolved.ticker, status="updated",
             company=row_to_response(updated_data),
-            message=f"Filled null fields: {', '.join(updates.keys())}",
+            message=f"Updated fields: {', '.join(updates.keys())}",
         )
     except Exception as exc:
         logger.warning("backfill_failed ticker=%s error=%s", ticker, exc)
