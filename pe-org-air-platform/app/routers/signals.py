@@ -499,12 +499,25 @@ async def score_hiring(ticker: str, force_refresh: bool = False):
         "**CS3 feeds:** Data Infrastructure (0.60), Technology Stack (0.40)"
     ),
 )
-async def score_digital_presence(ticker: str, force_refresh: bool = False):
-    """Score digital presence signal for one company."""
+# async def score_digital_presence(ticker: str, force_refresh: bool = False):
+#     """Score digital presence signal for one company."""
+#     start = time.time()
+#     try:
+#         service = get_tech_signal_service()
+#         result = await service.analyze_company(ticker.upper(), force_refresh=force_refresh)
+async def score_digital_presence(
+    ticker: str,
+    force_refresh: bool = False,
+    website: Optional[str] = Query(None, description="Company website from yfinance resolver"),
+):
     start = time.time()
     try:
         service = get_tech_signal_service()
-        result = await service.analyze_company(ticker.upper(), force_refresh=force_refresh)
+        result = await service.analyze_company(
+            ticker.upper(),
+            force_refresh=force_refresh,
+            website=website,             # ← forward to service
+        )
         return SingleSignalResponse(
             ticker=ticker.upper(),
             category="digital_presence",
