@@ -23,6 +23,7 @@ from app.routers.tc_vr_scoring import router as tc_vr_router
 from app.routers.position_factor import router as pf_router
 from app.routers.hr_scoring import router as hr_router
 from app.routers.orgair_scoring import router as orgair_router
+from app.routers.analyst_notes import router as analyst_notes_router
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.shutdown import set_shutdown, is_shutting_down
@@ -143,6 +144,17 @@ _OPENAPI_TAGS = [
             "**Prerequisite:** run CS2 signal scoring first."
         ),
     },
+
+    # ── CS4 — Analyst Notes ───────────────────────────────────────
+    {
+        "name": "Analyst Notes",
+        "description": (
+            "**CS4 — Analyst Notes Collector**  \n"
+            "Index post-LOI DD notes (interview transcripts, DD findings, data room summaries) "
+            "into ChromaDB for RAG retrieval, Snowflake for structured queries, and S3 for raw storage.  \n"
+            "Call `POST /{company_id}/load` after a server restart to restore the in-memory cache."
+        ),
+    },
 ]
 
 # FASTAPI APPLICATION CONFIGURATION
@@ -189,6 +201,7 @@ app.include_router(tc_vr_router)             # TC + V^R computation
 app.include_router(pf_router)               # Position Factor computation
 app.include_router(hr_router)               # Human Capital Risk computation
 app.include_router(orgair_router)           # Synergy + Org-AI-R computation
+app.include_router(analyst_notes_router)   # CS4 — Analyst Notes (interview, DD findings, data room)
 
 # COMMENTED OUT — not needed:
 # app.include_router(industries_router)        # static catalog, not used by CS4 clients
