@@ -1,5 +1,4 @@
-
-​# 🔍 PE Org-AI-R Platform : RAG Search & IC Preparation
+# 🔍 PE Org-AI-R Platform : RAG Search & IC Preparation
 
 > **Case Study 4: From Scores to Cited Justifications**
 > Big Data and Intelligent Analytics — Spring 2026 | Team 5
