@@ -163,3 +163,64 @@ def test_identify_gaps_finds_missing_keywords():
     gaps = JustificationGenerator._identify_gaps(cited, next_rubric)
     assert len(gaps) > 0
     assert any("data fabric" in g or "governance" in g for g in gaps)
+
+
+# ---------------------------------------------------------------------------
+# _verify_citations — additional edge cases
+# ---------------------------------------------------------------------------
+
+def test_verify_citations_appends_note_when_no_evidence():
+    from app.services.justification.generator import JustificationGenerator
+    summary = "NVDA shows strong data infrastructure."
+    result = JustificationGenerator._verify_citations(summary, [])
+    assert "[Note:" in result
+    assert "No supporting evidence" in result
+
+
+def test_verify_citations_clean_when_evidence_present():
+    from app.services.justification.generator import JustificationGenerator
+    # Summary references source types that ARE in the cited evidence
+    cited = [CitedEvidence("e1", "content", "sec_10k_item_1", "", 0.8, ["pipeline"], 0.8)]
+    summary = "Based on sec_10k_item_1, the company has strong infrastructure."
+    result = JustificationGenerator._verify_citations(summary, cited)
+    # No phantom sources → no note appended → returned as-is
+    assert "[Note:" not in result
+    assert "[Verification note:" not in result
+
+
+# ---------------------------------------------------------------------------
+# _match_to_rubric — sort order
+# ---------------------------------------------------------------------------
+
+def test_match_to_rubric_sorts_by_relevance():
+    from app.services.justification.generator import JustificationGenerator
+    docs = [
+        RetrievedDocument("low", "cloud pipeline", {}, 0.3, "dense"),
+        RetrievedDocument("high", "cloud pipeline streaming", {}, 0.9, "dense"),
+    ]
+    cited = JustificationGenerator._match_to_rubric(docs, ["cloud", "pipeline"])
+    assert cited[0].evidence_id == "high"
+
+
+# ---------------------------------------------------------------------------
+# _identify_gaps — edge cases
+# ---------------------------------------------------------------------------
+
+def test_identify_gaps_empty_next_rubric():
+    from app.services.justification.generator import JustificationGenerator
+    cited = [CitedEvidence("e1", "content", "sec", "", 0.8, ["cloud"], 0.8)]
+    assert JustificationGenerator._identify_gaps(cited, []) == []
+
+
+def test_identify_gaps_all_covered():
+    from app.services.justification.generator import JustificationGenerator
+    cited = [
+        CitedEvidence("e1", "has feature store and MLflow", "sec", "", 0.8,
+                      ["feature store", "MLflow"], 0.8),
+    ]
+    next_rubric = [
+        RubricCriteria("data_infrastructure", 5, "Excellent",
+                       "Automated governance", ["feature store", "MLflow"])
+    ]
+    gaps = JustificationGenerator._identify_gaps(cited, next_rubric)
+    assert gaps == []

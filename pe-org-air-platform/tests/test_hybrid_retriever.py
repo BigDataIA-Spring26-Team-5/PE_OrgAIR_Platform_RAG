@@ -103,3 +103,96 @@ def test_build_where_multiple():
     where = HybridRetriever._build_where({"company_id": "nvda", "dimension": "talent"})
     assert "$and" in where
     assert len(where["$and"]) == 2
+
+
+# ---------------------------------------------------------------------------
+# _flatten_filter
+# ---------------------------------------------------------------------------
+
+def test_flatten_filter_simple_dict():
+    flat = HybridRetriever._flatten_filter({"ticker": "nvda"})
+    assert flat == {"ticker": "nvda"}
+
+
+def test_flatten_filter_nested_and():
+    filt = {"$and": [{"ticker": "nvda"}, {"dimension": "talent"}]}
+    flat = HybridRetriever._flatten_filter(filt)
+    assert flat == {"ticker": "nvda", "dimension": "talent"}
+
+
+def test_flatten_filter_with_in_list():
+    filt = {"$and": [{"source_type": {"$in": ["sec_10k_item_1", "job_posting_indeed"]}}]}
+    flat = HybridRetriever._flatten_filter(filt)
+    assert flat["source_type"] == ["sec_10k_item_1", "job_posting_indeed"]
+
+
+def test_flatten_filter_none_returns_empty():
+    assert HybridRetriever._flatten_filter(None) == {}
+
+
+# ---------------------------------------------------------------------------
+# seed_from_evidence
+# ---------------------------------------------------------------------------
+
+from types import SimpleNamespace
+from unittest.mock import patch as _patch
+
+
+def make_evidence(evidence_id: str, content: str = "tech AI data pipeline", company_id: str = "nvda"):
+    return SimpleNamespace(
+        evidence_id=evidence_id,
+        content=content,
+        signal_category="technology_hiring",
+        company_id=company_id,
+        source_type="job_posting_indeed",
+        confidence=0.8,
+    )
+
+
+def make_empty_retriever():
+    r = HybridRetriever.__new__(HybridRetriever)
+    r.dense_weight = 0.6
+    r.sparse_weight = 0.4
+    r.rrf_k = 60
+    r._bm25 = None
+    r._doc_store = []
+    r._tokenized_corpus = []
+    r._seeded_tickers = set()
+    r._vector_store = MagicMock()
+    return r
+
+
+def test_seed_from_evidence_adds_to_bm25():
+    """seed_from_evidence with 3 evidence items → doc_store has 3 docs, BM25 built."""
+    r = make_empty_retriever()
+    evidence = [make_evidence(f"ev_{i:03d}") for i in range(3)]
+    # DimensionMapper is pure Python (no network), let it run naturally
+    r.seed_from_evidence(evidence)
+    assert len(r._doc_store) == 3
+    assert r._bm25 is not None
+
+
+def test_seed_from_evidence_deduplicates():
+    """Calling seed_from_evidence twice with same IDs → no duplicate docs."""
+    r = make_empty_retriever()
+    evidence = [make_evidence("ev_001"), make_evidence("ev_002")]
+    r.seed_from_evidence(evidence)
+    r.seed_from_evidence(evidence)  # second call with same IDs
+    doc_ids = [d.doc_id for d in r._doc_store]
+    assert len(doc_ids) == len(set(doc_ids))  # no duplicates
+    assert len(r._doc_store) == 2
+
+
+def test_seed_from_evidence_marks_tickers_seeded():
+    r = make_empty_retriever()
+    evidence = [make_evidence("ev_001", company_id="nvda")]
+    r.seed_from_evidence(evidence)
+    assert "nvda" in r._seeded_tickers
+
+
+def test_seed_ticker_is_noop():
+    """_seed_ticker only adds to _seeded_tickers, never calls VectorStore."""
+    r = make_empty_retriever()
+    r._seed_ticker("nvda")
+    assert "nvda" in r._seeded_tickers
+    r._vector_store.search.assert_not_called()
