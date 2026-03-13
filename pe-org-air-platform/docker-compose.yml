@@ -71,7 +71,7 @@ services:
                wait"
     restart: unless-stopped
     networks:
-      - pe_orgair_networkk
+      - pe_orgair_network
 
 networks:
   pe_orgair_network:
