@@ -8,10 +8,16 @@ Sources (in order of reliability):
   2. SEC EDGAR API → CIK number, fiscal year end, SIC code
   3. Groq LLM      → maps sector → industry_id, estimates position_factor
 
+Name-to-ticker resolution order:
+  1. yfinance.Search (fast, no API key needed)
+  2. SEC EDGAR full-text search
+  3. Groq LLM fallback
+
 Usage:
     from streamlit.utils.company_resolver import resolve_company
     result = resolve_company("GOOGL")
-    result = resolve_company("Google")
+    result = resolve_company("Apple")
+    result = resolve_company("Apple Inc")
     result = resolve_company("0001652044")
 """
 from __future__ import annotations
@@ -35,64 +41,50 @@ INDUSTRY_MAP: Dict[str, str] = {
     "technology":         "550e8400-e29b-41d4-a716-446655440006",
 }
 
-# ── Sector → industry mapping (covers yfinance sector names) ─────
 SECTOR_TO_INDUSTRY: Dict[str, str] = {
-    # Technology
-    "technology":                    "technology",
-    "communication services":        "technology",
-    "information technology":        "technology",
-
-    # Financial
-    "financial services":            "financial",
-    "financials":                    "financial",
-    "banking":                       "financial",
-    "insurance":                     "financial",
-
-    # Healthcare
-    "healthcare":                    "healthcare",
-    "health care":                   "healthcare",
-    "pharmaceuticals":               "healthcare",
-    "biotechnology":                 "healthcare",
-
-    # Manufacturing / Industrials
-    "industrials":                   "manufacturing",
-    "manufacturing":                 "manufacturing",
-    "materials":                     "manufacturing",
-    "energy":                        "manufacturing",
-    "utilities":                     "manufacturing",
-
-    # Retail / Consumer
-    "consumer cyclical":             "retail",
-    "consumer defensive":            "retail",
-    "retail":                        "retail",
-    "consumer staples":              "retail",
-    "consumer discretionary":        "retail",
-
-    # Business Services
-    "real estate":                   "business_services",
-    "services":                      "business_services",
-    "business services":             "business_services",
+    "technology":               "technology",
+    "communication services":   "technology",
+    "information technology":   "technology",
+    "financial services":       "financial",
+    "financials":               "financial",
+    "banking":                  "financial",
+    "insurance":                "financial",
+    "healthcare":               "healthcare",
+    "health care":              "healthcare",
+    "pharmaceuticals":          "healthcare",
+    "biotechnology":            "healthcare",
+    "industrials":              "manufacturing",
+    "manufacturing":            "manufacturing",
+    "materials":                "manufacturing",
+    "energy":                   "manufacturing",
+    "utilities":                "manufacturing",
+    "consumer cyclical":        "retail",
+    "consumer defensive":       "retail",
+    "retail":                   "retail",
+    "consumer staples":         "retail",
+    "consumer discretionary":   "retail",
+    "real estate":              "business_services",
+    "services":                 "business_services",
+    "business services":        "business_services",
 }
 
-GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
-GROQ_MODEL = "llama-3.1-8b-instant"
-GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
+GROQ_API_KEY   = os.getenv("GROQ_API_KEY", "")
+GROQ_MODEL     = "llama-3.1-8b-instant"
+GROQ_API_URL   = "https://api.groq.com/openai/v1/chat/completions"
 
-SEC_EDGAR_SEARCH = "https://efts.sec.gov/LATEST/search-index?q={query}&dateRange=custom&startdt=2020-01-01&enddt=2026-01-01&forms=10-K"
 SEC_EDGAR_COMPANY = "https://data.sec.gov/submissions/CIK{cik}.json"
 SEC_EDGAR_TICKERS = "https://www.sec.gov/files/company_tickers.json"
+SEC_HEADERS       = {"User-Agent": "PE-OrgAIR-Platform research@quantuniversity.com"}
 
 
 @dataclass
 class ResolvedCompany:
     """Full company metadata ready for POST /api/v1/companies."""
-    # Required for API
     name: str
     ticker: str
     industry_id: str
     position_factor: float = 0.0
 
-    # Enriched fields (filled by Groq background task in CS1)
     sector: Optional[str] = None
     sub_sector: Optional[str] = None
     revenue_millions: Optional[float] = None
@@ -100,76 +92,92 @@ class ResolvedCompany:
     market_cap_percentile: Optional[float] = None
     fiscal_year_end: Optional[str] = None
 
-    # Extra context (not stored in companies table)
     cik: Optional[str] = None
     market_cap: Optional[float] = None
     description: Optional[str] = None
     website: Optional[str] = None
     country: Optional[str] = None
 
-    # Resolution metadata
-    resolved_from: str = ""  # "yfinance", "sec_edgar", "groq"
+    resolved_from: str = ""
     confidence: float = 1.0
     warnings: list = field(default_factory=list)
 
 
-def _lookup_yfinance(ticker: str) -> Optional[Dict[str, Any]]:
-    """Fetch company info from yfinance."""
+# ── Name → Ticker resolution (3 strategies) ───────────────────────
+
+def _ticker_from_yfinance_search(query: str) -> Optional[str]:
+    """
+    Use yfinance.Search to find a ticker by company name.
+    This works without any API key — it hits Yahoo Finance search.
+    e.g. "Apple" → "AAPL", "Microsoft" → "MSFT"
+    """
     try:
         import yfinance as yf
-        t = yf.Ticker(ticker.upper())
-        info = t.info
-        if not info or not info.get("longName"):
+        # yfinance >= 0.2.28 has Search
+        search = yf.Search(query, max_results=5, news_count=0)
+        quotes = search.quotes
+        if not quotes:
             return None
-        return info
+        # Prefer EQUITY type (not ETF/index/crypto)
+        for q in quotes:
+            q_type = q.get("quoteType", "").upper()
+            symbol = q.get("symbol", "")
+            if q_type == "EQUITY" and symbol and re.match(r'^[A-Z]{1,5}$', symbol):
+                logger.info("yfinance_search query=%s → %s", query, symbol)
+                return symbol
+        # Fallback: first result regardless of type
+        symbol = quotes[0].get("symbol", "")
+        if symbol:
+            return symbol.upper()
+    except AttributeError:
+        # yfinance version too old — no Search class
+        logger.warning("yfinance.Search not available, skipping")
     except Exception as e:
-        logger.warning("yfinance_failed ticker=%s error=%s", ticker, e)
-        return None
-
-
-def _lookup_sec_cik(ticker: str) -> Optional[str]:
-    """Look up CIK number from SEC EDGAR company tickers file."""
-    try:
-        resp = requests.get(
-            SEC_EDGAR_TICKERS,
-            headers={"User-Agent": "PE-OrgAIR-Platform research@quantuniversity.com"},
-            timeout=10,
-        )
-        if resp.status_code != 200:
-            return None
-        data = resp.json()
-        ticker_upper = ticker.upper()
-        for _, company in data.items():
-            if company.get("ticker", "").upper() == ticker_upper:
-                cik = str(company["cik_str"]).zfill(10)
-                return cik
-    except Exception as e:
-        logger.warning("sec_cik_lookup_failed ticker=%s error=%s", ticker, e)
+        logger.warning("yfinance_search_failed query=%s error=%s", query, e)
     return None
 
 
-def _lookup_sec_by_name(company_name: str) -> Optional[str]:
-    """Search SEC EDGAR for a company by name, return ticker if found."""
+def _ticker_from_sec_name(company_name: str) -> Optional[str]:
+    """
+    Search SEC EDGAR company tickers file for a name match.
+    Downloads the full tickers list and fuzzy-matches by name.
+    e.g. "Apple" → "AAPL"
+    """
     try:
-        resp = requests.get(
-            f"https://efts.sec.gov/LATEST/search-index?q=%22{requests.utils.quote(company_name)}%22&forms=10-K",
-            headers={"User-Agent": "PE-OrgAIR-Platform research@quantuniversity.com"},
-            timeout=10,
-        )
+        resp = requests.get(SEC_EDGAR_TICKERS, headers=SEC_HEADERS, timeout=10)
         if resp.status_code != 200:
             return None
         data = resp.json()
-        hits = data.get("hits", {}).get("hits", [])
-        if hits:
-            source = hits[0].get("_source", {})
-            return source.get("file_date", None)
+        name_lower = company_name.lower().strip()
+        best_ticker = None
+        best_score  = 0
+
+        for _, co in data.items():
+            co_name  = co.get("title", "").lower()
+            co_tick  = co.get("ticker", "")
+            # Exact match
+            if co_name == name_lower:
+                return co_tick.upper()
+            # Name starts with query (e.g. "apple" matches "apple inc")
+            if co_name.startswith(name_lower) and len(name_lower) > best_score:
+                best_ticker = co_tick.upper()
+                best_score  = len(name_lower)
+            # Query starts with co_name (e.g. "apple inc" matches "apple")
+            elif name_lower.startswith(co_name) and len(co_name) > best_score:
+                best_ticker = co_tick.upper()
+                best_score  = len(co_name)
+
+        if best_ticker:
+            logger.info("sec_name_search query=%s → %s", company_name, best_ticker)
+        return best_ticker
+
     except Exception as e:
         logger.warning("sec_name_search_failed name=%s error=%s", company_name, e)
     return None
 
 
 def _ticker_from_name_groq(company_name: str) -> Optional[str]:
-    """Use Groq to resolve company name → ticker symbol."""
+    """Use Groq LLM to resolve company name → ticker symbol."""
     if not GROQ_API_KEY:
         return None
     try:
@@ -185,8 +193,8 @@ def _ticker_from_name_groq(company_name: str) -> Optional[str]:
                     "role": "user",
                     "content": (
                         f"What is the NYSE/NASDAQ ticker symbol for '{company_name}'? "
-                        f"Reply with ONLY the ticker symbol, nothing else. "
-                        f"Example: GOOGL or MSFT or AAPL"
+                        "Reply with ONLY the ticker symbol, nothing else. "
+                        "Example: GOOGL or MSFT or AAPL"
                     ),
                 }],
                 "max_tokens": 10,
@@ -196,86 +204,102 @@ def _ticker_from_name_groq(company_name: str) -> Optional[str]:
         )
         resp.raise_for_status()
         ticker = resp.json()["choices"][0]["message"]["content"].strip().upper()
-        # Validate — ticker should be 1-5 uppercase letters
         if re.match(r'^[A-Z]{1,5}$', ticker):
+            logger.info("groq_ticker_resolution name=%s → %s", company_name, ticker)
             return ticker
     except Exception as e:
         logger.warning("groq_ticker_resolution_failed name=%s error=%s", company_name, e)
     return None
 
 
-def _map_sector_to_industry(sector: str) -> tuple[str, str]:
+def _resolve_name_to_ticker(input_str: str) -> tuple[Optional[str], str]:
     """
-    Map yfinance sector string to your 6 industry categories.
-    Returns (industry_key, industry_id).
+    Try all 3 name-to-ticker strategies in order.
+    Returns (ticker, source_used).
     """
-    sector_lower = sector.lower().strip()
+    # Strategy 1: yfinance Search (fast, no API key)
+    ticker = _ticker_from_yfinance_search(input_str)
+    if ticker:
+        return ticker, "yfinance_search"
 
-    # Direct match
+    # Strategy 2: SEC EDGAR company name match
+    ticker = _ticker_from_sec_name(input_str)
+    if ticker:
+        return ticker, "sec_edgar_name"
+
+    # Strategy 3: Groq LLM fallback
+    ticker = _ticker_from_name_groq(input_str)
+    if ticker:
+        return ticker, "groq"
+
+    return None, "failed"
+
+
+# ── yfinance data fetch ───────────────────────────────────────────
+
+def _lookup_yfinance(ticker: str) -> Optional[Dict[str, Any]]:
+    """Fetch company info from yfinance."""
+    try:
+        import yfinance as yf
+        t    = yf.Ticker(ticker.upper())
+        info = t.info
+        if not info or not info.get("longName"):
+            return None
+        return info
+    except Exception as e:
+        logger.warning("yfinance_failed ticker=%s error=%s", ticker, e)
+        return None
+
+
+def _lookup_sec_cik(ticker: str) -> Optional[str]:
+    """Look up CIK number from SEC EDGAR company tickers file."""
+    try:
+        resp = requests.get(SEC_EDGAR_TICKERS, headers=SEC_HEADERS, timeout=10)
+        if resp.status_code != 200:
+            return None
+        data = resp.json()
+        ticker_upper = ticker.upper()
+        for _, company in data.items():
+            if company.get("ticker", "").upper() == ticker_upper:
+                return str(company["cik_str"]).zfill(10)
+    except Exception as e:
+        logger.warning("sec_cik_lookup_failed ticker=%s error=%s", ticker, e)
+    return None
+
+
+def _map_sector_to_industry(sector: str) -> tuple[str, str]:
+    sector_lower = sector.lower().strip()
     if sector_lower in SECTOR_TO_INDUSTRY:
         key = SECTOR_TO_INDUSTRY[sector_lower]
         return key, INDUSTRY_MAP[key]
-
-    # Partial match
     for s, key in SECTOR_TO_INDUSTRY.items():
         if s in sector_lower or sector_lower in s:
             return key, INDUSTRY_MAP[key]
-
-    # Default to business_services if no match
     logger.warning("sector_not_mapped sector=%s defaulting to business_services", sector)
     return "business_services", INDUSTRY_MAP["business_services"]
 
 
-def _calculate_position_factor(
-    market_cap: Optional[float],
-    sector: str,
-) -> float:
-    """
-    Estimate position factor from market cap.
-    Simple percentile-based approach using rough sector thresholds.
-    Returns value in [-1, 1].
-    """
+def _calculate_position_factor(market_cap: Optional[float], sector: str = "") -> float:
     if not market_cap:
         return 0.0
-
-    # Rough market cap thresholds by tier (USD)
-    MEGA_CAP = 500_000_000_000   # >500B → top tier
-    LARGE_CAP = 100_000_000_000  # >100B → large
-    MID_CAP = 10_000_000_000     # >10B  → mid
-    SMALL_CAP = 1_000_000_000    # >1B   → small
-
-    if market_cap >= MEGA_CAP:
-        return 0.9
-    elif market_cap >= LARGE_CAP:
-        return 0.6
-    elif market_cap >= MID_CAP:
-        return 0.3
-    elif market_cap >= SMALL_CAP:
-        return 0.0
-    else:
-        return -0.3
+    if market_cap >= 500_000_000_000:  return 0.9
+    if market_cap >= 100_000_000_000:  return 0.6
+    if market_cap >= 10_000_000_000:   return 0.3
+    if market_cap >= 1_000_000_000:    return 0.0
+    return -0.3
 
 
 def _calculate_market_cap_percentile(market_cap: Optional[float]) -> Optional[float]:
-    """Rough market cap percentile (0-1) based on absolute value."""
     if not market_cap:
         return None
-    MEGA_CAP = 500_000_000_000
-    LARGE_CAP = 100_000_000_000
-    MID_CAP = 10_000_000_000
-    SMALL_CAP = 1_000_000_000
+    if market_cap >= 500_000_000_000:  return 0.99
+    if market_cap >= 100_000_000_000:  return 0.85
+    if market_cap >= 10_000_000_000:   return 0.60
+    if market_cap >= 1_000_000_000:    return 0.35
+    return 0.10
 
-    if market_cap >= MEGA_CAP:
-        return 0.99
-    elif market_cap >= LARGE_CAP:
-        return 0.85
-    elif market_cap >= MID_CAP:
-        return 0.60
-    elif market_cap >= SMALL_CAP:
-        return 0.35
-    else:
-        return 0.10
 
+# ── Main entry point ──────────────────────────────────────────────
 
 def resolve_company(input_str: str) -> ResolvedCompany:
     """
@@ -283,31 +307,30 @@ def resolve_company(input_str: str) -> ResolvedCompany:
 
     Examples:
         resolve_company("GOOGL")
-        resolve_company("Google")
-        resolve_company("Alphabet Inc")
+        resolve_company("Apple")
+        resolve_company("Apple Inc")
+        resolve_company("Microsoft Corporation")
         resolve_company("0001652044")
-
-    Returns ResolvedCompany with all fields populated.
     """
-    input_str = input_str.strip()
-    warnings = []
-    ticker = None
-    cik = None
+    input_str  = input_str.strip()
+    warnings   = []
+    ticker     = None
+    cik        = None
+    name_source = "yfinance"
 
     # ── Detect input type ─────────────────────────────────────────
-    # CIK: 10-digit number
+
     if re.match(r'^\d{7,10}$', input_str):
+        # CIK number
         cik = input_str.zfill(10)
-        # Try to get ticker from SEC
         try:
             resp = requests.get(
                 SEC_EDGAR_COMPANY.format(cik=cik),
-                headers={"User-Agent": "PE-OrgAIR-Platform research@quantuniversity.com"},
-                timeout=10,
+                headers=SEC_HEADERS, timeout=10,
             )
             if resp.status_code == 200:
-                data = resp.json()
-                ticker = data.get("tickers", [None])[0]
+                data   = resp.json()
+                ticker = (data.get("tickers") or [None])[0]
                 if ticker:
                     ticker = ticker.upper()
         except Exception:
@@ -323,24 +346,41 @@ def resolve_company(input_str: str) -> ResolvedCompany:
                 warnings=warnings,
             )
 
-    # Ticker: 1-5 uppercase letters (or can be converted)
-    elif re.match(r'^[A-Za-z]{1,5}$', input_str):
-        ticker = input_str.upper()
+    elif re.match(r'^[A-Za-z]{1,5}$', input_str) and input_str.upper() == input_str.upper():
+        # Looks like a ticker — try it directly first
+        candidate = input_str.upper()
+        test_info = _lookup_yfinance(candidate)
+        if test_info:
+            ticker = candidate
+        else:
+            # Could be a short company name like "Apple" or "Meta"
+            # Try name resolution before giving up
+            logger.info("ticker_lookup_failed for %s, trying name resolution", candidate)
+            resolved_ticker, name_source = _resolve_name_to_ticker(input_str)
+            if resolved_ticker:
+                ticker = resolved_ticker
+            else:
+                # Last resort: use as-is and let yfinance error surface
+                ticker = candidate
+                warnings.append(
+                    f"'{input_str}' not found as a ticker. "
+                    "Try the full company name or official ticker symbol."
+                )
 
-    # Company name: resolve via Groq
     else:
-        ticker = _ticker_from_name_groq(input_str)
+        # Company name — resolve to ticker
+        ticker, name_source = _resolve_name_to_ticker(input_str)
         if not ticker:
             warnings.append(
-                f"Could not resolve ticker for '{input_str}'. "
-                "Try entering the ticker directly (e.g. GOOGL)"
+                f"Could not resolve '{input_str}' to a ticker symbol. "
+                "Try entering the ticker directly (e.g. AAPL for Apple)."
             )
             return ResolvedCompany(
                 name=input_str,
-                ticker=input_str.upper()[:10],
+                ticker=input_str.upper()[:10].replace(" ", ""),
                 industry_id=INDUSTRY_MAP["business_services"],
-                resolved_from="groq",
-                confidence=0.3,
+                resolved_from="failed",
+                confidence=0.2,
                 warnings=warnings,
             )
 
@@ -349,10 +389,9 @@ def resolve_company(input_str: str) -> ResolvedCompany:
 
     if not info:
         warnings.append(
-            f"yfinance returned no data for {ticker}. "
-            "Company may not be publicly listed."
+            f"yfinance returned no data for ticker '{ticker}'. "
+            "The company may not be publicly traded or the ticker may be incorrect."
         )
-        # Return minimal company with just ticker
         return ResolvedCompany(
             name=ticker,
             ticker=ticker,
@@ -363,18 +402,18 @@ def resolve_company(input_str: str) -> ResolvedCompany:
         )
 
     # ── Map sector → industry ─────────────────────────────────────
-    yf_sector = info.get("sector", "") or ""
+    yf_sector    = info.get("sector", "") or ""
     industry_key, industry_id = _map_sector_to_industry(yf_sector)
 
-    # ── Calculate financials ──────────────────────────────────────
-    market_cap = info.get("marketCap")
-    total_revenue = info.get("totalRevenue")
-    revenue_millions = round(total_revenue / 1_000_000, 1) if total_revenue else None
-    employee_count = info.get("fullTimeEmployees")
-    position_factor = _calculate_position_factor(market_cap, yf_sector)
-    market_cap_percentile = _calculate_market_cap_percentile(market_cap)
+    # ── Financials ────────────────────────────────────────────────
+    market_cap        = info.get("marketCap")
+    total_revenue     = info.get("totalRevenue")
+    revenue_millions  = round(total_revenue / 1_000_000, 1) if total_revenue else None
+    employee_count    = info.get("fullTimeEmployees")
+    position_factor   = _calculate_position_factor(market_cap, yf_sector)
+    mcp               = _calculate_market_cap_percentile(market_cap)
 
-    # ── Get CIK from SEC if not already known ────────────────────
+    # ── CIK from SEC ──────────────────────────────────────────────
     if not cik:
         cik = _lookup_sec_cik(ticker)
 
@@ -382,20 +421,12 @@ def resolve_company(input_str: str) -> ResolvedCompany:
     fiscal_year_end = None
     try:
         import yfinance as yf
-        t = yf.Ticker(ticker)
-        cal = t.calendar
-        if cal is not None and hasattr(cal, 'get'):
-            fiscal_year_end = cal.get("Earnings Date", [None])[0]
-            fiscal_year_end = None  # calendar gives earnings, not FY end
-        # Use financials to infer FY end month
-        fin = t.financials
+        fin = yf.Ticker(ticker).financials
         if fin is not None and not fin.empty:
-            last_col = fin.columns[0]
-            fiscal_year_end = last_col.strftime("%B")  # e.g. "December"
+            fiscal_year_end = fin.columns[0].strftime("%B")
     except Exception:
         pass
 
-    # ── Build result ──────────────────────────────────────────────
     return ResolvedCompany(
         name=info.get("longName", ticker),
         ticker=ticker,
@@ -405,14 +436,14 @@ def resolve_company(input_str: str) -> ResolvedCompany:
         sub_sector=info.get("industry", ""),
         revenue_millions=revenue_millions,
         employee_count=employee_count,
-        market_cap_percentile=market_cap_percentile,
+        market_cap_percentile=mcp,
         fiscal_year_end=fiscal_year_end,
         cik=cik,
         market_cap=market_cap,
-        description=info.get("longBusinessSummary", "")[:500] if info.get("longBusinessSummary") else "",
+        description=(info.get("longBusinessSummary", "") or "")[:500],
         website=info.get("website", ""),
         country=info.get("country", ""),
-        resolved_from="yfinance",
+        resolved_from=f"yfinance+{name_source}",
         confidence=0.95,
         warnings=warnings,
     )
@@ -420,18 +451,15 @@ def resolve_company(input_str: str) -> ResolvedCompany:
 
 def format_resolution_preview(company: ResolvedCompany) -> str:
     """Format resolved company for display in Streamlit."""
-    lines = [
-        f"**{company.name}** ({company.ticker})",
-        f"Sector: {company.sector or 'Unknown'} | "
-        f"Sub-sector: {company.sub_sector or 'Unknown'}",
-    ]
+    lines = [f"**{company.name}** ({company.ticker})"]
+    if company.sector:
+        lines.append(f"Sector: {company.sector} | Sub-sector: {company.sub_sector or 'Unknown'}")
     if company.revenue_millions:
         lines.append(f"Revenue: ${company.revenue_millions:,.0f}M")
     if company.employee_count:
         lines.append(f"Employees: {company.employee_count:,}")
     if company.cik:
         lines.append(f"SEC CIK: {company.cik}")
-    if company.warnings:
-        for w in company.warnings:
-            lines.append(f"⚠️ {w}")
+    for w in company.warnings:
+        lines.append(f"⚠️ {w}")
     return "\n".join(lines)

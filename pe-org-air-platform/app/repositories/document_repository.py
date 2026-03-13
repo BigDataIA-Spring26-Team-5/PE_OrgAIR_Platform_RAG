@@ -109,6 +109,76 @@ class DocumentRepository(BaseRepository):
             finally:
                 cur.close()
 
+    def get_documents_by_ticker_and_type(self, ticker: str, doc_type: str) -> List[Dict]:
+        """Get documents for a ticker filtered by filing type (e.g., 'DEF 14A')
+        
+        Also loads the document content from S3 parsed files.
+        """
+        sql = """
+        SELECT id, company_id, ticker, filing_type, filing_date,
+            source_url, s3_key, content_hash, word_count, chunk_count,
+            status, error_message, created_at, processed_at
+        FROM documents 
+        WHERE ticker = %s AND filing_type = %s
+        ORDER BY filing_date DESC
+        """
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            try:
+                cur.execute(sql, (ticker, doc_type))
+                columns = [col[0].lower() for col in cur.description]
+                results = [dict(zip(columns, row)) for row in cur.fetchall()]
+                
+                # Load content from S3 for each document
+                from app.services.s3_storage import get_s3_service
+                import json
+                s3 = get_s3_service()
+                
+                for doc in results:
+                    content = None
+                    
+                    if doc.get('s3_key'):
+                        s3_key = doc['s3_key']
+                        ticker = doc['ticker']
+                        filing_type = doc['filing_type'].replace(' ', '')  # "DEF 14A" → "DEF14A"
+                        filing_date = doc['filing_date']  # e.g., "2026-01-08"
+                        
+                        # Strategy 1: Try date-based parsed key (your actual format)
+                        # Pattern: sec/parsed/AAPL/DEF14A/2026-01-08_full.json
+                        parsed_key = f"sec/parsed/{ticker}/{filing_type}/{filing_date}_full.json"
+                        try:
+                            content_data = s3.get_file(parsed_key)
+                            if content_data:
+                                parsed = json.loads(content_data.decode('utf-8'))
+                                content = parsed.get('text_content', '')
+                                logger.debug(f"✅ Loaded content from {parsed_key}")
+                        except Exception as e:
+                            logger.debug(f"Parsed key not found: {parsed_key}")
+                        
+                        # Strategy 2: Try raw HTML if parsed failed
+                        if not content and s3_key:
+                            try:
+                                raw_data = s3.get_file(s3_key)
+                                if raw_data:
+                                    # Strip HTML tags for text content
+                                    import re
+                                    html = raw_data.decode('utf-8', errors='ignore')
+                                    # Basic HTML stripping
+                                    text = re.sub(r'<script[^>]*>.*?</script>', ' ', html, flags=re.DOTALL)
+                                    text = re.sub(r'<style[^>]*>.*?</style>', ' ', text, flags=re.DOTALL)
+                                    text = re.sub(r'<[^>]+>', ' ', text)
+                                    text = re.sub(r'\s+', ' ', text).strip()
+                                    content = text
+                                    logger.debug(f"✅ Loaded raw HTML from {s3_key}")
+                            except Exception as e:
+                                logger.debug(f"Raw key also failed: {s3_key}")
+                    
+                    doc['content'] = content or ''
+                
+                return results
+            finally:
+                cur.close()
+
     def exists_by_hash(self, content_hash: str) -> bool:
         """Check if a document with this hash already exists (deduplication)"""
         sql = "SELECT 1 FROM documents WHERE content_hash = %s"
