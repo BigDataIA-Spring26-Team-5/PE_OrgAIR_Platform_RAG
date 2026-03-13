@@ -8,7 +8,14 @@ NOW: Uses LLM (Groq) to suggest relevant subdomains based on company lookup.
 
 Stores results in S3 (raw) + Snowflake (metadata/scores).
 NO local file storage. NO job-posting-derived tech data.
+
+FIXES:
+  - BUG 1: _suggest_subdomains was sync but called async llm_router.complete()
+    → now uses asyncio to properly await the coroutine
+  - BUG 2: TechStackCollector.analyze_company() doesn't accept 'subdomains' kwarg
+    → removed subdomains from call, collector handles its own domain scanning
 """
+import asyncio
 import logging
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
@@ -37,20 +44,15 @@ class TechSignalService(BaseSignalService):
         self.signal_repo = get_signal_repository()
         self.llm_router = get_llm_router()
 
-    def _suggest_subdomains(
-        self, 
-        ticker: str, 
-        company_name: Optional[str], 
+    async def _suggest_subdomains_async(
+        self,
+        ticker: str,
+        company_name: Optional[str],
         website: Optional[str]
     ) -> List[str]:
         """
-        Use LLM to suggest relevant subdomains for a company based on:
-        - Company name
-        - Ticker
-        - Primary website
-        - Industry context
-        
-        Returns list of subdomain suggestions (e.g., ['careers', 'developers', 'api', 'cloud'])
+        Use LLM to suggest relevant subdomains for a company.
+        Now properly async — awaits the LLM router.
         """
         prompt = f"""You are analyzing the digital presence of a company to find their technology stack.
 
@@ -72,30 +74,37 @@ Return ONLY a JSON array of subdomain names (no protocol, no domain):
 Be specific to this company's likely digital infrastructure needs."""
 
         try:
-            response = self.llm_router.complete(
+            # FIX BUG 1: properly await the async complete() call
+            response = await self.llm_router.complete(
                 task="subdomain_suggestion",
                 messages=[{"role": "user", "content": prompt}],
             )
-            
-            # Parse JSON response
-            import json
-            response_text = response.strip()
+
+            # Handle response — could be a LiteLLM response object or string
+            if hasattr(response, "choices"):
+                response_text = response.choices[0].message.content.strip()
+            elif isinstance(response, str):
+                response_text = response.strip()
+            else:
+                response_text = str(response).strip()
+
             # Remove markdown code blocks if present
             if response_text.startswith("```"):
                 response_text = response_text.split("```")[1]
                 if response_text.startswith("json"):
                     response_text = response_text[4:]
             response_text = response_text.strip()
-            
+
+            import json
             subdomains = json.loads(response_text)
-            
+
             if isinstance(subdomains, list) and len(subdomains) > 0:
                 logger.info(f"  🤖 LLM suggested {len(subdomains)} subdomains for {ticker}: {subdomains[:3]}...")
                 return subdomains
             else:
                 logger.warning(f"  ⚠️ LLM returned invalid subdomain list for {ticker}")
                 return self._get_default_subdomains()
-                
+
         except Exception as e:
             logger.warning(f"  ⚠️ LLM subdomain suggestion failed for {ticker}: {e}")
             return self._get_default_subdomains()
@@ -111,32 +120,43 @@ Be specific to this company's likely digital infrastructure needs."""
     async def _collect(self, ticker: str, company_id: str, company: dict, **kwargs) -> dict:
         """
         Collect tech stack data with LLM-suggested subdomains.
-        
+
         Flow:
         1. Get company context (name, website)
-        2. Use LLM to suggest relevant subdomains
-        3. Pass subdomains to TechStackCollector for BuiltWith analysis
+        2. Use LLM to suggest relevant subdomains (async)
+        3. Pass to TechStackCollector for BuiltWith/Wappalyzer analysis
         4. Analyze and score results
         """
         company_name = company.get("name")
         website = kwargs.get("website")
-        
-        # Get LLM-suggested subdomains for this company (sync call)
-        suggested_subdomains = self._suggest_subdomains(
+
+        # Get LLM-suggested subdomains (now properly async)
+        suggested_subdomains = await self._suggest_subdomains_async(
             ticker=ticker,
             company_name=company_name,
             website=website
         )
-        
-        # Run tech stack analysis with suggested subdomains
-        result: TechStackResult = await self.collector.analyze_company(
-            company_id=company_id,
-            ticker=ticker,
-            company_name=company_name,
-            website=website,
-            subdomains=suggested_subdomains,  # ← LLM-powered subdomain list
-        )
-        
+
+        # FIX BUG 2: Don't pass subdomains= kwarg to analyze_company
+        # TechStackCollector.analyze_company() doesn't accept that parameter.
+        # Instead, pass subdomains info via the collector's own mechanism if available,
+        # or let it handle domain scanning on its own.
+        #
+        # Check if the collector's analyze_company accepts subdomains
+        import inspect
+        sig = inspect.signature(self.collector.analyze_company)
+        collector_kwargs = {
+            "company_id": company_id,
+            "ticker": ticker,
+            "company_name": company_name,
+            "website": website,
+        }
+        # Only pass subdomains if the collector actually accepts it
+        if "subdomains" in sig.parameters:
+            collector_kwargs["subdomains"] = suggested_subdomains
+
+        result: TechStackResult = await self.collector.analyze_company(**collector_kwargs)
+
         self._store_to_s3(ticker, result)
 
         return {
@@ -144,7 +164,7 @@ Be specific to this company's likely digital infrastructure needs."""
             "signal_date": datetime.now(timezone.utc),
             "raw_value": (
                 f"Tech stack analysis: {len(result.technologies)} techs detected "
-                f"from {result.domain} (checked {len(suggested_subdomains)} subdomains)"
+                f"from {result.domain} (suggested {len(suggested_subdomains)} subdomains)"
             ),
             "normalized_score": result.score,
             "confidence": result.confidence,
@@ -157,7 +177,7 @@ Be specific to this company's likely digital infrastructure needs."""
                 "builtwith_live_count": result.builtwith_total_live,
                 "wappalyzer_tech_count": len(result.wappalyzer_techs),
                 "ai_technologies": [t.name for t in result.technologies if t.is_ai_related],
-                "subdomains_checked": suggested_subdomains,
+                "subdomains_suggested": suggested_subdomains,
                 "analysis_sources": self._active_sources(result),
                 "errors": result.errors,
             },

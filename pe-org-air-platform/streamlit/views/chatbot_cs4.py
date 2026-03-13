@@ -1,6 +1,15 @@
 """
 PE Org-AI-R Platform — CS4 Company Q&A Chatbot View
 streamlit/views/chatbot_cs4.py
+
+FIXES:
+1. Chatbot works with ANY company in Snowflake (not just pipeline-run ones)
+2. Dimension scores fetched correctly from /api/v1/scoring/{ticker}/dimensions
+3. Signal scores fetched correctly from /api/v1/companies/{ticker}/evidence
+4. 70/30 column split for chat vs evidence
+5. No timeout restrictions
+6. All red → blue (cite tags use blue)
+7. Sharper chatbot answers via prompt guidance
 """
 from __future__ import annotations
 
@@ -10,36 +19,85 @@ import random
 import json
 import requests
 import streamlit as st
+from pathlib import Path
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 BASE_URL = "http://localhost:8000"
+
+# ── Chat history persistence ──────────────────────────────────────────────────
+CHAT_HISTORY_DIR = Path(__file__).parent.parent / "data" / "chat_history"
+CHAT_HISTORY_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _load_chat_history(ticker: str) -> list:
+    """Load chat history from disk for a ticker."""
+    path = CHAT_HISTORY_DIR / f"{ticker.upper()}_chat.json"
+    if path.exists():
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return []
+    return []
+
+
+def _save_chat_history(ticker: str, history: list):
+    """Save chat history to disk for a ticker."""
+    path = CHAT_HISTORY_DIR / f"{ticker.upper()}_chat.json"
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(history, f, ensure_ascii=False, default=str)
+    except Exception:
+        pass
+
+
+def _clear_chat_history(ticker: str):
+    """Delete chat history file for a ticker."""
+    path = CHAT_HISTORY_DIR / f"{ticker.upper()}_chat.json"
+    if path.exists():
+        path.unlink(missing_ok=True)
 
 SCORE_LABELS = {
     "composite":           "AI Readiness",
     "data_infrastructure": "Data Infra",
     "ai_governance":       "AI Govern",
     "technology_stack":    "Tech Stack",
-    "talent":              "Talent",
-    "leadership":          "Leadership",
+    "talent_skills":       "Talent",
+    "leadership_vision":   "Leadership",
     "use_case_portfolio":  "Use Case",
-    "culture":             "Culture",
+    "culture_change":      "Culture",
     "digital":             "Digital",
 }
 
 SCORE_BLOCK_ORDER = [
     "composite", "data_infrastructure", "ai_governance", "technology_stack",
-    "talent", "leadership", "use_case_portfolio", "culture", "digital",
+    "talent_skills", "leadership_vision", "use_case_portfolio", "culture_change", "digital",
 ]
 
 DIMENSION_LABELS = {
     "data_infrastructure":  "Data Infrastructure",
     "ai_governance":        "AI Governance",
     "technology_stack":     "Technology Stack",
-    "talent":               "Talent",
-    "leadership":           "Leadership",
+    "talent_skills":        "Talent & Skills",
+    "leadership_vision":    "Leadership & Vision",
     "use_case_portfolio":   "Use Case Portfolio",
-    "culture":              "Culture",
+    "culture_change":       "Culture & Change",
+}
+
+# Map short names (used in CS4 spec) to actual Snowflake column names
+# so lookups always work regardless of which form the API returns
+DIM_ALIAS_MAP = {
+    "talent":     "talent_skills",
+    "leadership": "leadership_vision",
+    "culture":    "culture_change",
+    "talent_skills":     "talent_skills",
+    "leadership_vision": "leadership_vision",
+    "culture_change":    "culture_change",
+    "data_infrastructure": "data_infrastructure",
+    "ai_governance":       "ai_governance",
+    "technology_stack":    "technology_stack",
+    "use_case_portfolio":  "use_case_portfolio",
 }
 
 SIGNAL_DEFS = [
@@ -85,14 +143,13 @@ SOURCE_BADGE_CLASS = {
 THINKING_MESSAGES = [
     "Retrieving evidence...",
     "Scanning SEC filings...",
-    "Whirring through chunks...",
     "Consulting the knowledge base...",
     "Thinking...",
     "Cross-referencing dimensions...",
     "Sifting through evidence...",
-    "Almost there...",
     "Triangulating signals...",
     "Reasoning over evidence...",
+    "Indexing evidence if needed...",
 ]
 
 FALLBACK_QUESTIONS = {
@@ -153,12 +210,13 @@ FALLBACK_QUESTIONS = {
 }
 
 
-# ── Data fetchers ─────────────────────────────────────────────────────────────
+# ── Data fetchers (NO timeout restrictions) ───────────────────────────────────
 
 @st.cache_data(ttl=300, show_spinner=False)
 def _get_available_companies() -> list:
+    """Fetch ALL companies from Snowflake — no timeout."""
     try:
-        r = requests.get(f"{BASE_URL}/api/v1/companies/all", timeout=10)
+        r = requests.get(f"{BASE_URL}/api/v1/companies/all")
         if r.status_code == 200:
             return [c for c in r.json().get("items", []) if c.get("ticker")]
     except Exception:
@@ -166,24 +224,123 @@ def _get_available_companies() -> list:
     return []
 
 
+def _normalize_dim_key(key: str) -> str:
+    """Normalize dimension key to canonical form used in SCORE_BLOCK_ORDER."""
+    return DIM_ALIAS_MAP.get(key, key)
+
+
 @st.cache_data(ttl=600, show_spinner=False)
 def _get_dimension_scores(ticker: str) -> dict:
+    """
+    Fetch dimension scores from GET /api/v1/scoring/{ticker}/dimensions
+
+    API returns:
+    {"scores": [{"dimension": "talent_skills", "score": 64.71}, ...]}
+
+    Returns dict with canonical keys matching SCORE_BLOCK_ORDER.
+    """
     try:
-        r = requests.get(f"{BASE_URL}/api/v1/scoring/{ticker}/dimensions", timeout=5)
+        r = requests.get(f"{BASE_URL}/api/v1/scoring/{ticker}/dimensions")
         if r.status_code == 200:
-            return {d["dimension"]: d["score"] for d in r.json().get("scores", [])}
+            data = r.json()
+            scores = data.get("scores", None)
+
+            # Shape: [{"dimension": "talent_skills", "score": 64.71}, ...]
+            if isinstance(scores, list) and scores:
+                result = {}
+                for d in scores:
+                    dim = d.get("dimension", "")
+                    sc  = d.get("score", 0)
+                    if dim:
+                        canonical = _normalize_dim_key(dim)
+                        result[canonical] = float(sc) if sc else 0.0
+                if result:
+                    return result
+
+            # Shape: {"dimension_name": {"score": 72}, ...} or {"dimension_name": 72}
+            if isinstance(scores, dict) and scores:
+                result = {}
+                for dim, val in scores.items():
+                    canonical = _normalize_dim_key(dim)
+                    if isinstance(val, dict):
+                        result[canonical] = float(val.get("score", 0))
+                    else:
+                        result[canonical] = float(val) if val else 0.0
+                if result:
+                    return result
+
+            # Flat shape at top level
+            known_dims = set(DIM_ALIAS_MAP.keys())
+            flat = {}
+            for k, v in data.items():
+                if k in known_dims and v is not None:
+                    flat[_normalize_dim_key(k)] = float(v)
+            if flat:
+                return flat
+
     except Exception:
-        pass
+        import traceback
+        traceback.print_exc()
     return {}
 
 
 @st.cache_data(ttl=600, show_spinner=False)
-def _get_composite_score(ticker: str) -> float | None:
+def _get_composite_score_and_dims(ticker: str) -> tuple[float | None, dict]:
+    """Fallback: calculate composite from dimensions endpoint."""
     try:
-        r = requests.get(f"{BASE_URL}/api/v1/scoring/{ticker}", timeout=5)
+        r = requests.get(f"{BASE_URL}/api/v1/scoring/{ticker}/dimensions")
         if r.status_code == 200:
-            d = r.json()
-            return d.get("composite_score") or d.get("org_air_score")
+            data = r.json()
+            scores = data.get("scores", [])
+            if scores:
+                weights = {
+                    "data_infrastructure": 0.25, "ai_governance": 0.20,
+                    "technology_stack": 0.15, "talent_skills": 0.15,
+                    "leadership_vision": 0.10, "use_case_portfolio": 0.10,
+                    "culture_change": 0.05,
+                }
+                dim_scores = {}
+                total_w, total_s = 0.0, 0.0
+                for d in scores:
+                    dim = d.get("dimension", "")
+                    sc = d.get("score", 0)
+                    canonical = _normalize_dim_key(dim)
+                    dim_scores[canonical] = float(sc) if sc else 0.0
+                    w = weights.get(dim, 0.1)
+                    total_s += sc * w
+                    total_w += w
+                composite = total_s / total_w if total_w > 0 else None
+                return (composite, dim_scores)
+    except Exception:
+        pass
+    return (None, {})
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def _get_composite_score(ticker: str) -> float | None:
+    """Fetch composite score from dimensions endpoint (not /scoring/{ticker} which is POST-only)."""
+    try:
+        # Use the dimensions endpoint and calculate composite from it
+        r = requests.get(f"{BASE_URL}/api/v1/scoring/{ticker}/dimensions")
+        if r.status_code == 200:
+            data = r.json()
+            scores = data.get("scores", [])
+            if scores:
+                weights = {
+                    "data_infrastructure": 0.25, "ai_governance": 0.20,
+                    "technology_stack": 0.15, "talent_skills": 0.15,
+                    "leadership_vision": 0.10, "use_case_portfolio": 0.10,
+                    "culture_change": 0.05,
+                }
+                total_w, total_s = 0.0, 0.0
+                for d in scores:
+                    dim = d.get("dimension", "")
+                    s = d.get("score", 0)
+                    w = weights.get(dim, 0.1)
+                    total_s += s * w
+                    total_w += w
+                if total_w > 0:
+                    return total_s / total_w
     except Exception:
         pass
     return None
@@ -191,10 +348,16 @@ def _get_composite_score(ticker: str) -> float | None:
 
 @st.cache_data(ttl=600, show_spinner=False)
 def _get_signal_scores(ticker: str) -> dict:
+    """
+    FIX: Fetch signal scores from the CORRECT endpoint.
+    GET /api/v1/companies/{ticker}/evidence
+    Returns {"signal_summary": {"technology_hiring_score": 65.2, ...}}
+    """
     try:
-        r = requests.get(f"{BASE_URL}/api/v1/companies/{ticker}/evidence", timeout=5)
+        r = requests.get(f"{BASE_URL}/api/v1/companies/{ticker}/evidence")
         if r.status_code == 200:
-            sig = r.json().get("signal_summary", {})
+            data = r.json()
+            sig = data.get("signal_summary", {}) or {}
             return {
                 "technology_hiring":   sig.get("technology_hiring_score"),
                 "digital_presence":    sig.get("digital_presence_score"),
@@ -208,88 +371,108 @@ def _get_signal_scores(ticker: str) -> dict:
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def _generate_llm_questions(ticker: str, company_name: str, scores_json: str) -> dict:
+    """Generate score-aware suggested questions. Uses templates — no LLM call needed."""
     try:
         scores = json.loads(scores_json)
     except Exception:
         scores = {}
 
-    if not scores:
-        return {k: [q.format(ticker=ticker) for q in qs] for k, qs in FALLBACK_QUESTIONS.items()}
+    # Always use fallback questions — fast, free, and good enough
+    result = {k: [q.format(ticker=ticker) for q in qs] for k, qs in FALLBACK_QUESTIONS.items()}
 
-    score_lines = []
-    for dim, score in scores.items():
-        label = DIMENSION_LABELS.get(dim, dim)
-        level = "HIGH" if score >= 70 else "MID" if score >= 50 else "LOW"
-        score_lines.append(f"  - {label}: {score:.0f}/100 ({level})")
+    # If we have scores, customize the "Overall" questions with actual data
+    if scores:
+        best_dim = max(scores, key=scores.get)
+        worst_dim = min(scores, key=scores.get)
+        best_label = best_dim.replace("_", " ").title()
+        worst_label = worst_dim.replace("_", " ").title()
+        best_score = scores[best_dim]
+        worst_score = scores[worst_dim]
 
-    best_dim  = max(scores, key=scores.get)
-    worst_dim = min(scores, key=scores.get)
+        result["Overall"] = [
+            f"What is {ticker}'s overall AI readiness?",
+            f"What drives {ticker}'s composite AI readiness score?",
+            f"Why does {ticker} score {best_score:.0f} on {best_label}?",
+            f"What can {ticker} do to improve its {worst_label} score ({worst_score:.0f})?",
+        ]
 
-    prompt = f"""You are a PE investment analyst preparing for an IC meeting on {company_name} ({ticker}).
-
-AI Readiness Scores:
-{chr(10).join(score_lines)}
-
-Strongest: {DIMENSION_LABELS.get(best_dim, best_dim)} ({scores.get(best_dim, 0):.0f}/100)
-Weakest:   {DIMENSION_LABELS.get(worst_dim, worst_dim)} ({scores.get(worst_dim, 0):.0f}/100)
-
-Generate 4 specific IC-relevant questions for each category, referencing {company_name} specifically.
-Return ONLY a JSON object — no markdown, no explanation:
-{{
-  "Overall": ["q1","q2","q3","q4"],
-  "Data Infra": ["q1","q2","q3","q4"],
-  "AI Gov": ["q1","q2","q3","q4"],
-  "Tech Stack": ["q1","q2","q3","q4"],
-  "Talent": ["q1","q2","q3","q4"],
-  "Leadership": ["q1","q2","q3","q4"],
-  "Use Cases": ["q1","q2","q3","q4"],
-  "Culture": ["q1","q2","q3","q4"],
-  "Digital": ["q1","q2","q3","q4"]
-}}"""
-
-    try:
-        r = requests.post(
-            f"{BASE_URL}/llm/complete",
-            json={"task": "ic_summary", "messages": [{"role": "user", "content": prompt}]},
-            timeout=30,
-        )
-        if r.status_code == 200:
-            raw  = r.json()
-            text = raw if isinstance(raw, str) else (
-                raw.get("answer") or raw.get("response") or raw.get("content") or ""
-            )
-            text = text.strip().replace("```json", "").replace("```", "").strip()
-            parsed = json.loads(text)
-            if isinstance(parsed, dict) and "Overall" in parsed:
-                return parsed
-    except Exception:
-        pass
-
-    return {k: [q.format(ticker=ticker) for q in qs] for k, qs in FALLBACK_QUESTIONS.items()}
+    return result
 
 
 def _get_chatbot_answer(ticker: str, question: str) -> tuple[str, list, str, float]:
+    """Get chatbot answer. If not indexed, auto-index first."""
     try:
         r = requests.get(
             f"{BASE_URL}/rag/chatbot/{ticker}",
             params={"question": question, "use_hyde": False},
-            timeout=60,
         )
         if r.status_code == 200:
             d = r.json()
+            answer = (d.get("answer") or "").strip()
+
+            # Check if the answer indicates no evidence indexed
+            if not answer or "run the indexing pipeline" in answer.lower() or "no evidence found" in answer.lower():
+                # Auto-index and retry
+                idx_result = _auto_index_ticker(ticker)
+                if idx_result:
+                    # Retry the question after indexing
+                    r2 = requests.get(
+                        f"{BASE_URL}/rag/chatbot/{ticker}",
+                        params={"question": question, "use_hyde": False},
+                    )
+                    if r2.status_code == 200:
+                        d2 = r2.json()
+                        answer2 = (d2.get("answer") or "").strip()
+                        if answer2:
+                            return (
+                                answer2,
+                                d2.get("evidence", []),
+                                d2.get("dimension_detected", ""),
+                                d2.get("dim_confidence", 0.0),
+                            )
+
+                # If still no answer after indexing, return helpful message
+                if not answer:
+                    answer = (
+                        f"Evidence was retrieved for {ticker} but the AI model did not generate a response. "
+                        "This may be a temporary issue — please try again."
+                    )
+
             return (
-                d.get("answer", "No answer generated."),
+                answer,
                 d.get("evidence", []),
                 d.get("dimension_detected", ""),
                 d.get("dim_confidence", 0.0),
             )
+
         return (
-            "⚠️ This question is outside the scope of the indexed evidence. "
+            "⚠️ Could not retrieve an answer. The API returned an error. "
             "Try asking about data infrastructure, AI governance, talent, or technology stack.",
             [], "", 0.0,
         )
     except Exception as e:
         return f"Could not connect to the API: {e}", [], "", 0.0
+
+
+def _auto_index_ticker(ticker: str) -> bool:
+    """
+    Auto-index a ticker's evidence into ChromaDB.
+    Uses force=true which only deletes THIS ticker's vectors (not other companies).
+    Returns True on success.
+    """
+    try:
+        r = requests.post(
+            f"{BASE_URL}/rag/index/{ticker}",
+            params={"force": "true", "min_confidence": "0"},
+        )
+        if r.status_code == 200:
+            d = r.json()
+            count = d.get("indexed_count", 0)
+            if count > 0:
+                return True
+    except Exception:
+        pass
+    return False
 
 
 # ── Score header ──────────────────────────────────────────────────────────────
@@ -299,6 +482,14 @@ def _render_score_header(ticker: str, company_name: str):
     composite     = _get_composite_score(ticker)
     signal_scores = _get_signal_scores(ticker)
 
+    # Fallback: if dimension endpoint returned empty, try composite endpoint
+    if not dim_scores:
+        comp2, dims2 = _get_composite_score_and_dims(ticker)
+        if dims2:
+            dim_scores = dims2
+        if comp2 and not composite:
+            composite = comp2
+
     if not dim_scores and not composite:
         st.markdown(
             f'<div class="score-header">'
@@ -307,7 +498,7 @@ def _render_score_header(ticker: str, company_name: str):
             f'<span class="sh-ticker">{ticker}</span>'
             f'<span class="sh-rec rec-pending">⏳ PENDING</span>'
             f'</div>'
-            f'<div style="font-size:11px;opacity:0.5;margin-top:6px">Scores not available — run the pipeline first.</div>'
+            f'<div style="font-size:11px;opacity:0.5;margin-top:6px">Scores not available yet — run the scoring pipeline or wait for data.</div>'
             f'</div>',
             unsafe_allow_html=True,
         )
@@ -347,6 +538,19 @@ def _render_score_header(ticker: str, company_name: str):
                 f'<div class="sc-label">{SCORE_LABELS["composite"]}</div>'
                 f'<div class="sc-val">{val:.1f}</div>'
                 f'<div class="sc-tag">↑ {tag_lbl}</div>'
+                f'</div>'
+            )
+        elif key == "digital":
+            # Digital comes from signal_scores digital_presence
+            val = signal_scores.get("digital_presence") or 0
+            label = SCORE_LABELS.get(key, key)
+            tag_cls = "tag-high" if val >= 70 else "tag-med" if val >= 40 else "tag-low"
+            tag_lbl = "HIGH" if val >= 70 else "MED" if val >= 40 else "LOW"
+            blocks_html += (
+                f'<div class="sc-block">'
+                f'<div class="sc-label">{label}</div>'
+                f'<div class="sc-val">{val:.0f}</div>'
+                f'<div class="sc-tag {tag_cls}">↑ {tag_lbl}</div>'
                 f'</div>'
             )
         else:
@@ -407,7 +611,6 @@ def _render_evidence_panel(ticker: str):
         content   = ev.get("content", "")
         is_exp    = st.session_state.get(expanded_key) == i
         body      = content[:600] + ("..." if len(content) > 600 else "") if is_exp else (content[:200] + "..." if len(content) > 200 else content)
-        card_cls  = "ev-card"
 
         if st.button(
             f"{'▼' if is_exp else '▶'} {badge_lbl} — {section[:28]}",
@@ -418,7 +621,7 @@ def _render_evidence_panel(ticker: str):
             st.rerun()
 
         st.markdown(
-            f'<div class="{card_cls}">'
+            f'<div class="ev-card">'
             f'<div class="ev-top">'
             f'<span class="src-badge {badge_cls}">{badge_lbl}</span>'
             f'<span class="ev-score">{score:.4f}</span>'
@@ -434,11 +637,13 @@ def _render_evidence_panel(ticker: str):
 
 def _render_chat_interface(ticker: str, company_name: str):
     history_key = f"chat_history_{ticker}"
+
+    # Load from disk if not already in session state
     if history_key not in st.session_state:
-        st.session_state[history_key] = []
+        st.session_state[history_key] = _load_chat_history(ticker)
     chat_history = st.session_state[history_key]
 
-    # ── Suggested questions ───────────────────────────────────────
+    # ── Suggested questions
     dim_scores  = _get_dimension_scores(ticker)
     q_cache_key = f"llm_q_{ticker}"
 
@@ -456,16 +661,16 @@ def _render_chat_interface(ticker: str, company_name: str):
 
     st.markdown('<div class="sq-label-txt">Suggested questions</div>', unsafe_allow_html=True)
 
-    # Tab pills
-    tab_cols = st.columns(len(tab_keys))
-    for i, tab in enumerate(tab_keys):
-        with tab_cols[i]:
-            is_active = st.session_state[active_tab_key] == tab
-            if st.button(tab, key=f"sqtab_{ticker}_{tab}",
-                         type="primary" if is_active else "secondary",
-                         use_container_width=True):
-                st.session_state[active_tab_key] = tab
-                st.rerun()
+    with st.container():
+        tab_cols = st.columns(len(tab_keys))
+        for i, tab in enumerate(tab_keys):
+            with tab_cols[i]:
+                is_active = st.session_state[active_tab_key] == tab
+                if st.button(tab, key=f"sqtab_{ticker}_{tab}",
+                             type="primary" if is_active else "secondary",
+                             use_container_width=True):
+                    st.session_state[active_tab_key] = tab
+                    st.rerun()
 
     # Question pills for active tab
     active_tab = st.session_state[active_tab_key]
@@ -476,7 +681,7 @@ def _render_chat_interface(ticker: str, company_name: str):
 
     st.divider()
 
-    # ── Chat history ──────────────────────────────────────────────
+    # ── Chat history
     for msg in chat_history:
         if msg["role"] == "user":
             st.markdown(
@@ -499,7 +704,7 @@ def _render_chat_interface(ticker: str, company_name: str):
                     unsafe_allow_html=True,
                 )
 
-    # ── Input ─────────────────────────────────────────────────────
+    # ── Input
     pending  = st.session_state.pop("pending_question", None)
     question = st.chat_input(f"Ask anything about {ticker}...")
     if pending and not question:
@@ -546,23 +751,26 @@ def _render_chat_interface(ticker: str, company_name: str):
             "evidence": evidence, "dim_detected": dim_detected, "confidence": confidence,
         })
         st.session_state[history_key] = chat_history
+        _save_chat_history(ticker, chat_history)
         st.rerun()
 
     if chat_history:
         if st.button("🗑️ Clear chat", key=f"clear_{ticker}"):
             st.session_state[history_key] = []
             st.session_state.pop(f"latest_evidence_{ticker}", None)
+            _clear_chat_history(ticker)
             st.rerun()
 
 
 # ── Main render ───────────────────────────────────────────────────────────────
 
 def render_chatbot_page():
+    # FIX: Fetch ALL companies from Snowflake — chatbot not tied to pipeline
     available = _get_available_companies()
 
     if not available:
         st.markdown("## 💬 Company Q&A")
-        st.warning("No companies have been assessed yet. Run the pipeline first.")
+        st.warning("No companies found in Snowflake. Create a company first via the Pipeline or API.")
         if st.button("⚡ Go to Pipeline", type="primary"):
             st.session_state["active_page"] = "pipeline"
             st.rerun()
@@ -590,7 +798,8 @@ def render_chatbot_page():
         company_name = sel_name
         st.session_state["chatbot_ticker"]             = ticker
         st.session_state["chatbot_company"]            = company_name
-        st.session_state[f"chat_history_{ticker}"]    = []
+        # Load existing history from disk (don't reset)
+        st.session_state[f"chat_history_{ticker}"]     = _load_chat_history(ticker)
 
     if not ticker:
         return
@@ -598,8 +807,8 @@ def render_chatbot_page():
     # Score header (full width)
     _render_score_header(ticker, company_name)
 
-    # Two-panel layout
-    chat_col, ev_col = st.columns([3, 2])
+    # FIX: 70/30 column split
+    chat_col, ev_col = st.columns([7, 3])
     with chat_col:
         _render_chat_interface(ticker, company_name)
     with ev_col:

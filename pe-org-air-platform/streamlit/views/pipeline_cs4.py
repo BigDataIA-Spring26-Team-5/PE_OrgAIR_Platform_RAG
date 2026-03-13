@@ -2,13 +2,14 @@
 PE Org-AI-R Platform — CS4 Pipeline View
 streamlit/views/pipeline_cs4.py
 
-BUG FIXES (v2):
-  - BUG #2 FIXED: _run_single_step now passes force=True to _step_parse and
-    _step_chunk when the step was already done (status=="done"). This ensures
-    the Re-run button actually re-runs instead of silently skipping.
-  - BUG #4 FIXED: _get_completed_steps now fetches /evidence only ONCE and
-    reuses the response for steps 4, 5, and 6. Previously hit Snowflake 3×
-    redundantly, causing 5-10 second page lag per render.
+FIXES v3:
+  - If ticker already exists in Snowflake → auto-confirm, show individual run buttons
+  - If ticker is new → show confirm card + Run full pipeline + individual buttons
+  - Steps show correct Done/Waiting status from _get_completed_steps
+  - Dimension scores shown in a ROW grid (not column)
+  - on_step_complete maps "success" → "done" for display
+  - No timeout restrictions
+  - BUG #2 + #4 fixes preserved
 """
 from __future__ import annotations
 
@@ -49,9 +50,18 @@ STEP_RUNNING_MSGS = [
     "Embedding chunks and uploading to Chroma pe_evidence collection...",
 ]
 
+# Prerequisites relaxed — only company (step 0) is hard required for most steps.
+# Steps can run in any order as long as the company exists.
 STEP_PREREQUISITES = {
-    0: [], 1: [0], 2: [0, 1], 3: [0, 1, 2], 4: [0, 1],
-    5: [0], 6: [0], 7: [0, 4, 5, 6], 8: [0, 7],
+    0: [],      # Company Setup — no prereqs
+    1: [0],     # SEC Filings — needs company
+    2: [0],     # Parse — needs company (will check docs internally)
+    3: [0],     # Chunk — needs company
+    4: [0],     # Signal Scoring — needs company
+    5: [0],     # Glassdoor — needs company
+    6: [0],     # Board Governance — needs company
+    7: [0],     # Scoring — needs company (will use whatever signals exist)
+    8: [0],     # Index Evidence — needs company
 }
 
 TICKER_SECTOR_MAP = {
@@ -77,7 +87,7 @@ def _get_sector(company) -> str:
 
 def _load_companies() -> list:
     try:
-        r = requests.get(f"{BASE_URL}/api/v1/companies/all", timeout=10)
+        r = requests.get(f"{BASE_URL}/api/v1/companies/all")
         if r.status_code == 200:
             return r.json().get("items", [])
     except Exception:
@@ -85,65 +95,82 @@ def _load_companies() -> list:
     return []
 
 
+def _company_exists_in_snowflake(ticker: str) -> dict | None:
+    """Check if company already exists in Snowflake. Returns company dict or None."""
+    try:
+        r = requests.get(f"{BASE_URL}/api/v1/companies/{ticker}")
+        if r.status_code == 200:
+            return r.json()
+    except Exception:
+        pass
+    return None
+
+
 def _get_completed_steps(ticker: str) -> set[int]:
-    """
-    Determine which pipeline steps are already complete for a ticker.
-
-    BUG #4 FIX: Previously fetched /api/v1/companies/{ticker}/evidence three
-    separate times — once each for steps 4 (signals), 5 (glassdoor), and 6
-    (board). Each call opens a new Snowflake connection (~1-2s each), causing
-    5-10 seconds of lag every time the pipeline page renders or reruns.
-
-    Fix: fetch evidence ONCE, reuse the response for all three signal checks.
-
-    Steps:
-    - Step 0 (company):   GET /api/v1/companies/{ticker}
-    - Step 1 (collect):   doc raw_count OR evidence doc_count > 0
-    - Step 2 (parse):     parsed_count > 0  via /documents/{ticker}/status
-    - Step 3 (chunk):     chunk_count > 0
-    - Step 4 (signals):   technology_hiring/digital_presence/etc score present
-    - Step 5 (glassdoor): culture_score present
-    - Step 6 (board):     board_governance_score present
-    - Step 7 (scoring):   dimension scores exist
-    - Step 8 (index):     chatbot_ready
-    """
+    """Determine which pipeline steps are already complete."""
     completed = set()
 
-    # ── Step 0 — company exists ───────────────────────────────────────────────
+    # Step 0 — company exists
     try:
-        r = requests.get(f"{BASE_URL}/api/v1/companies/{ticker}", timeout=5)
+        r = requests.get(f"{BASE_URL}/api/v1/companies/{ticker}")
         if r.status_code == 200:
             completed.add(0)
     except Exception:
         pass
 
-    # ── Steps 1 / 2 / 3 — document pipeline status ───────────────────────────
+    # Steps 1/2/3 — document pipeline status
+    # Primary: /api/v1/documents/stats/{ticker}
+    # Returns: {"total": 33, "chunks": 125, "form_10k": 3, ...}
     try:
-        r = requests.get(f"{BASE_URL}/api/v1/documents/{ticker}/status", timeout=5)
+        r = requests.get(f"{BASE_URL}/api/v1/documents/stats/{ticker}")
         if r.status_code == 200:
             ds = r.json()
-            if ds.get("raw_count", 0) > 0:
-                completed.add(1)        # collect done
-            if ds.get("parsed_count", 0) > 0:
-                completed.add(2)        # parse done
-            if ds.get("chunk_count", 0) > 0:
-                completed.add(3)        # chunk done
+            total_docs = (
+                ds.get("total", 0)
+                or ds.get("total_documents", 0)
+                or ds.get("document_count", 0)
+                or ds.get("raw_count", 0)
+            )
+            chunks = (
+                ds.get("chunks", 0)
+                or ds.get("chunk_count", 0)
+                or ds.get("total_chunks", 0)
+            )
+            # If total docs > 0 → collected (step 1) AND parsed (step 2)
+            if total_docs > 0:
+                completed.add(1)  # collected
+                completed.add(2)  # parsed (docs are counted after parsing)
+            # If chunks > 0 → chunked (step 3)
+            if chunks > 0:
+                completed.add(3)
     except Exception:
         pass
 
-    # ── Steps 1 (fallback) + 4 / 5 / 6 — ONE evidence fetch covers all ────────
-    # BUG #4 FIX: fetch /evidence ONCE, reuse for step 1 fallback AND all signal
-    # checks (steps 4, 5, 6). Previously called 3× separately = 3 Snowflake
-    # connections. Now a single request covers every signal-related check.
+    # Fallback: try /api/v1/documents/{ticker}/status (may 404)
+    if 1 not in completed:
+        try:
+            r = requests.get(f"{BASE_URL}/api/v1/documents/{ticker}/status")
+            if r.status_code == 200:
+                ds = r.json()
+                if ds.get("raw_count", 0) > 0 or ds.get("total", 0) > 0:
+                    completed.add(1)
+                if ds.get("parsed_count", 0) > 0 or ds.get("total", 0) > 0:
+                    completed.add(2)
+                if ds.get("chunk_count", 0) > 0 or ds.get("chunks", 0) > 0:
+                    completed.add(3)
+        except Exception:
+            pass
+
+    # Steps 4/5/6 + fallback for step 1 — ONE evidence fetch
     evidence_data: dict = {}
     try:
-        r = requests.get(f"{BASE_URL}/api/v1/companies/{ticker}/evidence", timeout=5)
+        r = requests.get(f"{BASE_URL}/api/v1/companies/{ticker}/evidence")
         if r.status_code == 200:
             evidence_data = r.json()
     except Exception:
         pass
 
-    # Fallback for step 1 if /documents/status endpoint didn't return it
+    # Fallback for step 1 from evidence doc count
     if 1 not in completed:
         doc_count = (
             evidence_data.get("document_count", 0)
@@ -153,31 +180,85 @@ def _get_completed_steps(ticker: str) -> set[int]:
             completed.add(1)
 
     sig = evidence_data.get("signal_summary", {}) or {}
+    signals_list = evidence_data.get("signals", []) or []
 
-    # Step 4 — technology signals
+    # Build a set of signal categories that exist in the signals array
+    signal_categories = {s.get("category", "") for s in signals_list if s.get("normalized_score")}
+
+    # Step 4 — technology signals (any of the 4 signal scores present)
     if sig and any(sig.get(k) for k in [
         "technology_hiring_score", "digital_presence_score",
         "innovation_activity_score", "leadership_signals_score",
     ]):
         completed.add(4)
+    # Fallback: check signals array for tech-related categories
+    if 4 not in completed:
+        tech_cats = {"technology_hiring", "digital_presence", "innovation_activity", "leadership_signals"}
+        if signal_categories & tech_cats:
+            completed.add(4)
 
-    # Step 5 — glassdoor/culture signal
-    if sig and sig.get("culture_score") is not None:
+    # Step 5 — glassdoor/culture
+    # Check signal_summary first
+    culture_val = (
+        sig.get("culture_score")
+        or sig.get("culture_change_score")
+        or sig.get("glassdoor_score")
+    )
+    if culture_val is not None and culture_val != 0:
         completed.add(5)
+    # Fallback: check signals array for culture-related categories
+    if 5 not in completed:
+        culture_cats = {"culture", "culture_signals", "glassdoor", "glassdoor_reviews"}
+        if signal_categories & culture_cats:
+            completed.add(5)
+    # Fallback 2: check the glassdoor-specific endpoint (data in S3)
+    if 5 not in completed:
+        try:
+            r = requests.get(f"{BASE_URL}/api/v1/glassdoor-signals/{ticker}")
+            if r.status_code == 200:
+                gd = r.json()
+                if gd.get("overall_score") and gd["overall_score"] > 0:
+                    completed.add(5)
+        except Exception:
+            pass
 
-    # Step 6 — board governance signal
-    if sig and sig.get("board_governance_score") is not None:
+    # Step 6 — board governance
+    # Check signal_summary first
+    board_val = (
+        sig.get("board_governance_score")
+        or sig.get("board_composition_score")
+        or sig.get("governance_score")
+    )
+    if board_val is not None and board_val != 0:
         completed.add(6)
+    # Fallback: check signals array for board governance category
+    if 6 not in completed:
+        board_cats = {"board_governance", "board_composition", "governance_signals"}
+        if signal_categories & board_cats:
+            completed.add(6)
+    # Fallback 2: check the board-governance-specific endpoint (data in S3)
+    if 6 not in completed:
+        try:
+            r = requests.get(f"{BASE_URL}/api/v1/board-governance/score/{ticker}")
+            if r.status_code == 200:
+                bg = r.json()
+                if bg.get("governance_score") and bg["governance_score"] > 0:
+                    completed.add(6)
+        except Exception:
+            pass
 
-    # ── Step 7 — dimension scores ─────────────────────────────────────────────
+    # Step 7 — dimension scores exist
     try:
-        r = requests.get(f"{BASE_URL}/api/v1/scoring/{ticker}/dimensions", timeout=5)
-        if r.status_code == 200 and r.json().get("scores"):
-            completed.add(7)
+        r = requests.get(f"{BASE_URL}/api/v1/scoring/{ticker}/dimensions")
+        if r.status_code == 200:
+            data = r.json()
+            scores = data.get("scores", [])
+            if scores and len(scores) > 0:
+                completed.add(7)
     except Exception:
         pass
 
-    # ── Step 8 — evidence indexed (chatbot ready) ─────────────────────────────
+    # Step 8 — evidence indexed (chatbot ready)
     try:
         client = PipelineClient()
         status = client.get_company_status(ticker)
@@ -213,18 +294,7 @@ def _step_html(i: int, name: str, icon: str, detail: str,
 
 
 def _run_single_step(resolved, client: PipelineClient, idx: int, name: str, ticker: str, already_done: bool = False):
-    """
-    Run a single pipeline step from the individual step Re-run buttons.
-
-    BUG #2 FIX: Pass force=True to _step_parse and _step_chunk when the step
-    was already done (already_done=True). Without force=True, the skip conditions
-    inside those methods would fire immediately and silently do nothing, making
-    the Re-run button appear broken.
-
-    already_done is True when step_states[idx]["status"] == "done", meaning the
-    step completed successfully in a prior run and the user is explicitly
-    requesting a re-run.
-    """
+    """Run a single pipeline step."""
     ph = st.empty()
     ph.info(f"🔄 Running **Step {idx + 1}: {name}**...")
     start = time.time()
@@ -235,11 +305,9 @@ def _run_single_step(resolved, client: PipelineClient, idx: int, name: str, tick
             result = client._step_collect_sec(ticker, resolved.cik)
         elif idx == 2:
             ds = client._get_doc_status(ticker)
-            # BUG #2 FIX: force=True when re-running an already-completed parse step.
             result = client._step_parse(ticker, doc_status=ds, force=already_done)
         elif idx == 3:
             ds = client._get_doc_status(ticker)
-            # BUG #2 FIX: force=True when re-running an already-completed chunk step.
             result = client._step_chunk(ticker, doc_status=ds, force=already_done)
         elif idx == 4:
             website = getattr(resolved, "website", None)
@@ -268,6 +336,122 @@ def _run_single_step(resolved, client: PipelineClient, idx: int, name: str, tick
         ph.error(f"❌ **Step {idx + 1}: {name}** — {e}")
 
 
+def _render_step_rows(resolved, ticker: str, completed: set[int]):
+    """Render the 9 pipeline step rows with individual run buttons."""
+    client = PipelineClient()
+
+    step_states_key = f"step_states_{ticker}"
+    if step_states_key not in st.session_state:
+        st.session_state[step_states_key] = {
+            i: {"status": "idle", "msg": "", "elapsed": ""}
+            for i in range(len(PIPELINE_STEPS))
+        }
+    step_states = st.session_state[step_states_key]
+
+    # Mark completed steps as "done"
+    for i in completed:
+        if step_states[i]["status"] in ("idle", ""):
+            step_states[i]["status"] = "done"
+
+    for i, (step_name, icon, detail) in enumerate(PIPELINE_STEPS):
+        prereqs  = STEP_PREREQUISITES[i]
+        missing  = [p for p in prereqs if p not in completed]
+        disabled = bool(missing)
+        state    = step_states[i]
+        btn_lbl  = "Re-run" if state["status"] == "done" else "▶ Run"
+        already_done = (state["status"] == "done")
+
+        row_col, btn_col = st.columns([10, 1])
+        with row_col:
+            st.markdown(
+                _step_html(i, step_name, icon, detail,
+                           state["status"], state["msg"], state["elapsed"]),
+                unsafe_allow_html=True,
+            )
+        with btn_col:
+            st.markdown("<div style='padding-top:12px'>", unsafe_allow_html=True)
+            if st.button(btn_lbl, key=f"run_step_{i}_{ticker}",
+                         disabled=disabled, use_container_width=True):
+                _run_single_step(resolved, client, i, step_name, ticker, already_done=already_done)
+                st.rerun()
+            st.markdown("</div>", unsafe_allow_html=True)
+
+    # Progress bar
+    done_count = sum(1 for s in step_states.values() if s["status"] == "done")
+    pct        = done_count / len(PIPELINE_STEPS)
+    prog_lbl   = f"{done_count} of {len(PIPELINE_STEPS)} steps complete" if done_count else "Ready to run"
+    st.markdown(
+        f'<div class="prog-label">{prog_lbl}</div>'
+        f'<div class="prog-bar"><div class="prog-fill" style="width:{pct*100:.0f}%"></div></div>',
+        unsafe_allow_html=True,
+    )
+
+
+def _show_dimension_scores_inline(ticker: str):
+    """Show composite + 7 dimension scores in a horizontal ROW grid."""
+    try:
+        # Fetch dimension scores
+        r = requests.get(f"{BASE_URL}/api/v1/scoring/{ticker}/dimensions")
+        if r.status_code != 200:
+            return
+        dim_scores = r.json().get("scores", [])
+        if not dim_scores:
+            return
+
+        # Calculate composite as weighted average
+        weights = {
+            "data_infrastructure": 0.25, "ai_governance": 0.20,
+            "technology_stack": 0.15, "talent_skills": 0.15,
+            "leadership_vision": 0.10, "use_case_portfolio": 0.10,
+            "culture_change": 0.05,
+        }
+        total_w, total_s = 0.0, 0.0
+        for dim in dim_scores:
+            d = dim.get("dimension", "")
+            s = dim.get("score", 0)
+            w = weights.get(d, 0.1)
+            total_s += s * w
+            total_w += w
+        composite = total_s / total_w if total_w > 0 else 0
+
+        # Also try fetching actual composite from API
+        try:
+            r2 = requests.get(f"{BASE_URL}/api/v1/scoring/{ticker}")
+            if r2.status_code == 200:
+                d2 = r2.json()
+                api_composite = d2.get("composite_score") or d2.get("org_air_score")
+                if api_composite:
+                    composite = float(api_composite)
+        except Exception:
+            pass
+
+        # Build HTML — composite first, then 7 dimensions
+        items_html = (
+            f'<div class="dim-score-item" style="background:rgba(79,70,229,0.06);border-color:#4F46E5">'
+            f'<div class="dim-score-label" style="color:#4F46E5;opacity:1">AI Readiness (Overall)</div>'
+            f'<div class="dim-score-value">{composite:.1f}</div>'
+            f'</div>'
+        )
+        for dim in dim_scores:
+            label = dim.get("dimension", "").replace("_", " ").title()
+            score = dim.get("score", 0)
+            items_html += (
+                f'<div class="dim-score-item">'
+                f'<div class="dim-score-label">{label}</div>'
+                f'<div class="dim-score-value">{score:.1f}</div>'
+                f'</div>'
+            )
+        st.markdown(
+            f'<div style="margin:12px 0">'
+            f'<div style="font-size:14px;font-weight:600;margin-bottom:8px">📊 Dimension Scores</div>'
+            f'<div class="dim-scores-grid">{items_html}</div>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+    except Exception:
+        pass
+
+
 # ── Main render ───────────────────────────────────────────────────────────────
 
 def render_pipeline_page():
@@ -279,8 +463,8 @@ def render_pipeline_page():
     )
     st.markdown("<br>", unsafe_allow_html=True)
 
-    # ── Input row ─────────────────────────────────────────────────
-    inp_col, btn_col = st.columns([5, 1])
+    # ── Input row
+    inp_col, btn_col = st.columns([4, 2])
     with inp_col:
         company_input = st.text_input(
             label="Company ticker, name, or CIK",
@@ -289,22 +473,39 @@ def render_pipeline_page():
             label_visibility="collapsed",
         )
     with btn_col:
-        fetch_clicked = st.button("Fetch company details", use_container_width=True, key="fetch_btn")
+        fetch_clicked = st.button("🔍 Fetch Company Details", use_container_width=True, key="fetch_btn", type="primary")
 
-    # ── Resolve ───────────────────────────────────────────────────
+    # ── Resolve
     resolved = st.session_state.get("resolved_company")
 
     if company_input and fetch_clicked:
-        with st.spinner("Resolving via Yahoo Finance + SEC EDGAR..."):
-            try:
-                resolved = resolve_company(company_input)
-                st.session_state["resolved_company"]  = resolved
-                st.session_state["company_confirmed"] = False
-            except Exception as e:
-                st.error(f"Could not resolve: {e}")
-                resolved = None
+        # First check: does this company already exist in Snowflake?
+        existing = _company_exists_in_snowflake(company_input.strip().upper())
 
-    # ── Company confirm card ──────────────────────────────────────
+        if existing:
+            # Company already exists — resolve it and auto-confirm
+            with st.spinner("Company found in Snowflake, resolving details..."):
+                try:
+                    resolved = resolve_company(company_input)
+                    st.session_state["resolved_company"]  = resolved
+                    st.session_state["company_confirmed"] = True  # AUTO-CONFIRM
+                    st.session_state["company_is_existing"] = True
+                except Exception as e:
+                    st.error(f"Could not resolve: {e}")
+                    resolved = None
+        else:
+            # New company — normal flow
+            with st.spinner("Resolving via Yahoo Finance + SEC EDGAR..."):
+                try:
+                    resolved = resolve_company(company_input)
+                    st.session_state["resolved_company"]  = resolved
+                    st.session_state["company_confirmed"] = False
+                    st.session_state["company_is_existing"] = False
+                except Exception as e:
+                    st.error(f"Could not resolve: {e}")
+                    resolved = None
+
+    # ── Company card + pipeline controls
     if resolved:
         ticker    = resolved.ticker
         name      = resolved.name
@@ -314,6 +515,7 @@ def render_pipeline_page():
         emp       = resolved.employee_count
         initials  = ticker[:2].upper()
         confirmed = st.session_state.get("company_confirmed", False)
+        is_existing = st.session_state.get("company_is_existing", False)
 
         rev_str  = f"${rev:,.0f}M" if rev else "N/A"
         emp_str  = f"{emp:,}" if emp else "N/A"
@@ -331,6 +533,7 @@ def render_pipeline_page():
             unsafe_allow_html=True,
         )
 
+        # ── For NEW companies: show confirm buttons first
         if not confirmed:
             c1, c2, _ = st.columns([1, 1, 4])
             with c1:
@@ -343,71 +546,39 @@ def render_pipeline_page():
                     st.session_state["company_confirmed"] = False
                     st.rerun()
 
-        # ── Run full pipeline button ──────────────────────────────
-        if st.button(
-            "Run full pipeline",
-            type="primary",
-            disabled=not confirmed,
-            use_container_width=True,
-            key="run_full_btn",
-        ):
-            _run_full_pipeline(resolved)
-            return
+        # ── After confirmation
+        if confirmed:
+            completed = _get_completed_steps(ticker)
 
-        # ── Step rows ─────────────────────────────────────────────
-        client    = PipelineClient()
-        completed = _get_completed_steps(ticker) if confirmed else set()
-
-        step_states_key = f"step_states_{ticker}"
-        if step_states_key not in st.session_state:
-            st.session_state[step_states_key] = {
-                i: {"status": "idle", "msg": "", "elapsed": ""}
-                for i in range(len(PIPELINE_STEPS))
-            }
-        step_states = st.session_state[step_states_key]
-        for i in completed:
-            if step_states[i]["status"] == "idle":
-                step_states[i]["status"] = "done"
-
-        st.markdown("<br>", unsafe_allow_html=True)
-
-        for i, (step_name, icon, detail) in enumerate(PIPELINE_STEPS):
-            prereqs  = STEP_PREREQUISITES[i]
-            missing  = [p for p in prereqs if p not in completed]
-            disabled = (not confirmed) or bool(missing)
-            state    = step_states[i]
-            btn_lbl  = "Re-run" if state["status"] == "done" else "▶ Run"
-            # BUG #2 FIX: track whether this step is already done so _run_single_step
-            # can pass force=True to parse/chunk, bypassing the skip logic.
-            already_done = (state["status"] == "done")
-
-            row_col, btn_col = st.columns([10, 1])
-            with row_col:
+            if is_existing and len(completed) > 0:
+                # ── EXISTING COMPANY: show status + individual run buttons only
                 st.markdown(
-                    _step_html(i, step_name, icon, detail,
-                               state["status"], state["msg"], state["elapsed"]),
+                    f'<div style="font-size:12px;color:#4F46E5;margin:8px 0 4px">'
+                    f'✅ <b>{name}</b> already exists in platform — use individual steps below to re-run or update.</div>',
                     unsafe_allow_html=True,
                 )
-            with btn_col:
-                st.markdown("<div style='padding-top:12px'>", unsafe_allow_html=True)
-                if st.button(btn_lbl, key=f"run_step_{i}_{ticker}",
-                             disabled=disabled, use_container_width=True):
-                    # BUG #2 FIX: pass already_done so force=True is set for re-runs
-                    _run_single_step(resolved, client, i, step_name, ticker, already_done=already_done)
-                    st.rerun()
-                st.markdown("</div>", unsafe_allow_html=True)
 
-        # ── Progress bar ──────────────────────────────────────────
-        done_count = sum(1 for s in step_states.values() if s["status"] == "done")
-        pct        = done_count / len(PIPELINE_STEPS)
-        prog_lbl   = f"{done_count} of {len(PIPELINE_STEPS)} steps complete" if done_count else "Ready to run"
-        st.markdown(
-            f'<div class="prog-label">{prog_lbl}</div>'
-            f'<div class="prog-bar"><div class="prog-fill" style="width:{pct*100:.0f}%"></div></div>',
-            unsafe_allow_html=True,
-        )
+                # Show dimension scores if they exist (step 7 done)
+                if 7 in completed:
+                    _show_dimension_scores_inline(ticker)
 
-    # ── Companies table ───────────────────────────────────────────
+                st.markdown("<br>", unsafe_allow_html=True)
+                _render_step_rows(resolved, ticker, completed)
+
+            else:
+                # ── NEW COMPANY: show Run full pipeline + individual steps
+                if st.button(
+                    "▶ Run Full Pipeline",
+                    type="primary",
+                    use_container_width=True,
+                    key="run_full_btn",
+                ):
+                    _run_full_pipeline(resolved)
+
+                st.markdown("<br>", unsafe_allow_html=True)
+                _render_step_rows(resolved, ticker, completed)
+
+    # ── Companies table
     st.markdown("<br>", unsafe_allow_html=True)
     st.divider()
     _render_companies_table()
@@ -473,9 +644,11 @@ def _run_full_pipeline(resolved):
         idx = next((i for i, (n, _, _) in enumerate(PIPELINE_STEPS) if n == step.name), None)
         if idx is not None:
             dur = f"{step.duration_seconds:.1f}s"
+            # Map "success" → "done" for display
+            display_status = "done" if step.status == "success" else step.status
             step_phs[idx].markdown(
                 _step_html(idx, step.name, PIPELINE_STEPS[idx][1], PIPELINE_STEPS[idx][2],
-                           step.status, step.message, dur),
+                           display_status, step.message, dur),
                 unsafe_allow_html=True,
             )
             pct = (idx + 1) / len(PIPELINE_STEPS)
@@ -488,19 +661,16 @@ def _run_full_pipeline(resolved):
     def on_substep(step_name: str, msg: str):
         status_ph.caption(f"↳ {msg}")
 
-    # Track step results to warn on parse/chunk failure
     _step_results: dict = {}
     _orig_complete = on_step_complete
 
     def on_step_complete_with_guard(step: PipelineStepResult):
         _step_results[step.name] = step
         _orig_complete(step)
-        # If chunk fails, warn loudly — signals will run but have no SEC evidence
         if step.name == "Chunk Documents" and step.status == "error":
             status_ph.warning(
                 "⚠️ Chunk failed — no parsed docs found. "
-                "Re-run **Parse Documents** (Step 3) then **Chunk Documents** (Step 4) "
-                "before re-running Signal Scoring and Index."
+                "Re-run **Parse Documents** (Step 3) then **Chunk Documents** (Step 4)."
             )
 
     pipeline_start = time.time()
@@ -532,6 +702,9 @@ def _run_full_pipeline(resolved):
     else:
         st.error(f"❌ Pipeline failed after **{time_str}**")
 
+    # Show dimension scores
+    _show_dimension_scores_inline(ticker)
+
     index_step = next(
         (s for s in (result.steps or []) if s.name == "Index Evidence" and s.status == "success"),
         None,
@@ -539,12 +712,13 @@ def _run_full_pipeline(resolved):
     if index_step:
         indexed = index_step.data.get("indexed_count", 0)
         st.success(f"**{indexed} evidence vectors indexed** — Chatbot is now ready!")
-        if st.button(f"💬 Start Chatbot for {ticker}", type="primary",
-                     use_container_width=True, key="go_chat_post_pipe"):
-            st.session_state["active_page"]     = "chatbot"
-            st.session_state["chatbot_ticker"]  = ticker
-            st.session_state["chatbot_company"] = resolved.name
-            st.rerun()
+
+    if st.button(f"💬 Start Chatbot for {ticker}", type="primary",
+                 use_container_width=True, key="go_chat_post_pipe"):
+        st.session_state["active_page"]     = "chatbot"
+        st.session_state["chatbot_ticker"]  = ticker
+        st.session_state["chatbot_company"] = resolved.name
+        st.rerun()
 
     if result.steps:
         with st.expander("Step timing breakdown", expanded=False):
