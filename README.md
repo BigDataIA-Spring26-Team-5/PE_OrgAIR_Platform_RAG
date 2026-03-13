@@ -17,7 +17,6 @@ RAG-powered due diligence platform that transforms CS1–CS3 scoring outputs int
 | **Project Codelabs** | [CS4 Walkthrough](https://codelabs-preview.appspot.com/?file_id=16_uZuNqImUhPztCSOeEnVWznIwW3TT5R477rsmvLrSA#2) |
 |**Demo Video**|[https://northeastern-my.sharepoint.com/](https://northeastern-my.sharepoint.com/:v:/g/personal/bukka_b_northeastern_edu/IQAXchs-_8NKTIRyquLz9pMrAU2Y4OSKWJLDYFLlle0YIew?nav=eyJyZWZlcnJhbEluZm8iOnsicmVmZXJyYWxBcHAiOiJTdHJlYW1XZWJBcHAiLCJyZWZlcnJhbFZpZXciOiJTaGFyZURpYWxvZy1MaW5rIiwicmVmZXJyYWxBcHBQbGF0Zm9ybSI6IldlYiIsInJlZmVycmFsTW9kZSI6InZpZXcifX0%3D&e=gVH4cq)|
 |**Streamlit Deployed UI**|[https://pe-org-air-platform-rag.streamlit.app/](https://pe-org-air-platform-rag.streamlit.app/)|
-|**Deployed FastApi**||
 
 ---
 
