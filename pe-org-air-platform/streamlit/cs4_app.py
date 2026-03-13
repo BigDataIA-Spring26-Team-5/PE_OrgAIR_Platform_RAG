@@ -73,14 +73,14 @@ footer { visibility: hidden; }
   padding: 10px 0 12px 0; margin-bottom: 12px;
 }
 .sh-top { display: flex; align-items: center; gap: 12px; margin-bottom: 10px; }
-.sh-company { font-size: 15px; font-weight: 600; }
+.sh-company { font-size: 17px; font-weight: 600; }
 .sh-ticker {
-  font-size: 11px; padding: 2px 8px; border-radius: 5px; font-weight: 600;
+  font-size: 12px; padding: 3px 10px; border-radius: 5px; font-weight: 600;
   background: rgba(79,70,229,0.12); color: #4F46E5;
 }
 .sh-rec {
-  margin-left: auto; font-size: 11px; font-weight: 600;
-  padding: 4px 12px; border-radius: 5px; border: 1px solid;
+  margin-left: auto; font-size: 12px; font-weight: 600;
+  padding: 5px 14px; border-radius: 5px; border: 1px solid;
 }
 .rec-proceed { background: #f0fdf4; color: #15803d; border-color: #86efac; }
 .rec-caution { background: #fffbeb; color: #92400e; border-color: #fcd34d; }
@@ -96,22 +96,22 @@ footer { visibility: hidden; }
 }
 .sc-block:last-child { border-right: none; }
 .sc-label {
-  font-size: 9px; opacity: 0.55; margin-bottom: 3px;
+  font-size: 11px; opacity: 0.6; margin-bottom: 3px;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-  text-transform: uppercase; letter-spacing: 0.04em;
+  text-transform: uppercase; letter-spacing: 0.04em; font-weight: 500;
 }
-.sc-val  { font-size: 16px; font-weight: 600; }
+.sc-val  { font-size: 20px; font-weight: 700; }
 .sc-tag  {
-  display: inline-flex; font-size: 9px; padding: 2px 5px;
+  display: inline-flex; font-size: 10px; padding: 2px 6px;
   border-radius: 3px; margin-top: 2px; font-weight: 600;
 }
 .tag-high { background: #f0fdf4; color: #15803d; }
 .tag-low  { background: #fffbeb; color: #92400e; }
 .tag-med  { background: #eff6ff; color: #1e40af; }
 
-.sc-block.sc-main { background: rgba(79,70,229,0.08); flex: 0 0 130px; }
+.sc-block.sc-main { background: rgba(79,70,229,0.08); flex: 0 0 140px; }
 .sc-main .sc-label { color: #4F46E5; opacity: 1; }
-.sc-main .sc-val   { font-size: 20px; color: #4F46E5; }
+.sc-main .sc-val   { font-size: 24px; color: #4F46E5; }
 .sc-main .sc-tag   { background: #4F46E5; color: #fff; }
 
 .sc-block.sc-strongest { background: #fffbeb !important; border-left: 3px solid #d97706 !important; }
