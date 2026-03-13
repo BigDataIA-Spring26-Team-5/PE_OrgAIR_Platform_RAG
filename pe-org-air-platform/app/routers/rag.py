@@ -24,8 +24,12 @@ from app.prompts.rag_prompts import (
     CHATBOT_USER,
 )
 import structlog
+from app.guardrails.input_guards import validate_ticker, validate_question, validate_dimension
+from app.guardrails.output_guards import check_answer_length, check_answer_grounded, check_no_refusal
 
 logger = structlog.get_logger(__name__)
+
+MAX_CONTEXT_CHARS = 6000
 
 router = APIRouter(prefix="/rag", tags=["CS4 RAG"])
 
@@ -849,6 +853,21 @@ async def chatbot_query(
        (CUDA, Hopper, H100, DGX, Gemini, etc.) that keyword matching misses.
     4. No dimension → ticker-only retrieval with raw query
     """
+    result = validate_ticker(ticker)
+    if not result.passed:
+        logger.warning("rag.guardrail_blocked", guard="validate_ticker", reason=result.reason)
+        raise HTTPException(status_code=400, detail=result.reason)
+
+    result = validate_question(question)
+    if not result.passed:
+        logger.warning("rag.guardrail_blocked", guard="validate_question", reason=result.reason)
+        raise HTTPException(status_code=400, detail=result.reason)
+
+    result = validate_dimension(dimension)
+    if not result.passed:
+        logger.warning("rag.guardrail_blocked", guard="validate_dimension", reason=result.reason)
+        raise HTTPException(status_code=400, detail=result.reason)
+
     logger.info("rag.chatbot_query", ticker=ticker, question_len=len(question))
     retriever = _get_retriever()
     llm_router = _get_router()
@@ -920,6 +939,9 @@ async def chatbot_query(
 
     context = "\n\n---\n\n".join(context_parts)
 
+    if len(context) > MAX_CONTEXT_CHARS:
+        context = context[:MAX_CONTEXT_CHARS] + "\n\n[Context truncated to fit token budget.]"
+
     dim_instruction = ""
     if detected_dimension and dim_confidence >= _DIM_CONFIDENCE_THRESHOLD:
         dim_label = detected_dimension.replace("_", " ").title()
@@ -951,6 +973,13 @@ async def chatbot_query(
     except Exception as e:
         logger.error("rag.chatbot_llm_error", ticker=ticker, error=str(e))
         answer = f"Evidence retrieved but could not generate answer: {e}"
+
+    answer = check_no_refusal(answer)
+    answer = check_answer_grounded(answer, results_sorted[:4])
+    length_result = check_answer_length(answer)
+    if not length_result.passed:
+        logger.warning("rag.guardrail_blocked", guard="check_answer_length", reason=length_result.reason)
+        answer = f"[Guard: answer quality check failed — {length_result.reason}]"
 
     return {
         "answer": answer,
