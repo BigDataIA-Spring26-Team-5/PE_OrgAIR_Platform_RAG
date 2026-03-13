@@ -15,6 +15,10 @@ Step order (9 steps, all synchronous):
 KEY FIX: Step 5 uses /signals/score/{ticker}/all (synchronous, blocks until all 4
 signals complete) instead of /signals/collect (async fire-and-forget).
 Steps 6+7 run BEFORE Step 8 so Glassdoor/board S3 files exist when CS3 reads them.
+
+WEBSITE FIX: resolved.website is now threaded through to the digital_presence
+signal endpoint so BuiltWith/Wappalyzer use the real yfinance-resolved domain
+instead of a hardcoded or derived fallback.
 """
 from __future__ import annotations
 
@@ -176,31 +180,6 @@ class PipelineClient:
     def _get_doc_status(self, ticker: str) -> Dict[str, Any]:
         """
         Query how many documents are raw / parsed / chunked for this ticker.
-
-        Reads the ACTUAL response shape from /api/v1/companies/{ticker}/evidence:
-          {
-            "document_summary": {
-              "total_documents": 40,
-              "by_status": {          ← statuses that EXIST are listed here
-                "chunked": 6,         ← only present if > 0
-                "parsed": 34          ← only present if > 0
-              }                       ← "raw" key absent = 0 raw documents
-            }
-          }
-
-        Key insight: the API only includes statuses with count > 0 in by_status.
-        A missing key means count == 0, NOT unknown. So:
-          - no "raw" / "collected" key  → nothing unprocessed (safe to skip parse)
-          - no "parsed" key             → nothing parsed-but-not-chunked (safe to skip chunk)
-
-        Returns:
-            {
-                "total_documents": int,
-                "parsed_count": int,    # docs with status == "parsed" (not yet chunked)
-                "chunked_count": int,   # docs with status == "chunked"
-                "raw_count": int,       # docs with status == "raw" or "collected"
-                "by_status": dict,      # raw by_status dict for debugging
-            }
         Falls back to all-zeros on any error so the caller always gets a dict.
         """
         empty = {
@@ -220,13 +199,9 @@ class PipelineClient:
             summary = data.get("document_summary", data)
             total   = int(summary.get("total_documents", 0))
 
-            # by_status only lists statuses with count > 0
-            # Missing key = 0 documents in that state
             by_status = summary.get("by_status", {})
             chunked   = int(by_status.get("chunked", 0))
             parsed    = int(by_status.get("parsed",  0))
-
-            # "raw" documents may appear as "raw", "collected", or "pending"
             raw = int(
                 by_status.get("raw", 0)
                 or by_status.get("collected", 0)
@@ -235,7 +210,7 @@ class PipelineClient:
 
             return {
                 "total_documents": total,
-                "parsed_count":    parsed,    # parsed but NOT yet chunked
+                "parsed_count":    parsed,
                 "chunked_count":   chunked,
                 "raw_count":       raw,
                 "by_status":       by_status,
@@ -253,9 +228,9 @@ class PipelineClient:
             "industry_id": resolved.industry_id,
             "position_factor": resolved.position_factor,
         }
-        if resolved.sector:        payload["sector"] = resolved.sector
-        if resolved.revenue_millions: payload["revenue_millions"] = resolved.revenue_millions
-        if resolved.employee_count:   payload["employee_count"] = resolved.employee_count
+        if resolved.sector:             payload["sector"] = resolved.sector
+        if resolved.revenue_millions:   payload["revenue_millions"] = resolved.revenue_millions
+        if resolved.employee_count:     payload["employee_count"] = resolved.employee_count
 
         try:
             resp = self._session.post(
@@ -300,11 +275,11 @@ class PipelineClient:
         on_substep: Optional[Callable[[str], None]] = None,
     ) -> PipelineStepResult:
         start = time.time()
-        import datetime
+        import datetime as _dt
         filing_types = ["10-K", "8-K", "DEF 14A"]
 
         if on_substep:
-            yr = datetime.datetime.now().year
+            yr = _dt.datetime.now().year
             for ft in filing_types:
                 for y in [yr, yr - 1]:
                     on_substep(f"Querying {ft} ({y})...")
@@ -348,24 +323,16 @@ class PipelineClient:
                 error=str(e), duration_seconds=time.time() - start,
             )
 
+    # ── Signal status helpers ─────────────────────────────────────────────────
+
     def _get_signal_scores_today(self, ticker: str) -> Dict[str, Any]:
         """
         Return per-signal status for today from /api/v1/companies/{ticker}/evidence.
 
-        Returns a dict keyed by signal category:
-          {
-            "technology_hiring":  {"score": 63.8, "raw_value": "...", "scored_today": True,  "should_skip": True},
-            "digital_presence":   {"score": 0.0,  "raw_value": "...", "scored_today": True,  "should_skip": False},
-            "innovation_activity":{"score": 100,  "raw_value": "...", "scored_today": True,  "should_skip": True},
-            "leadership_signals": {"score": 70.0, "raw_value": "...", "scored_today": True,  "should_skip": True},
-          }
-
         Skip rule per signal:
           scored_today=True AND score > 0  →  should_skip=True
-          score == 0 OR score is None      →  should_skip=False  (re-run it)
-          not scored today                 →  should_skip=False  (re-run it)
-
-        Falls back to all should_skip=False on any error (safe default = always run).
+          score == 0 OR None               →  should_skip=False (re-run it)
+          not scored today                 →  should_skip=False (re-run it)
         """
         SIGNAL_SCORE_KEYS = {
             "technology_hiring":   "technology_hiring_score",
@@ -388,11 +355,10 @@ class PipelineClient:
 
             data    = resp.json()
             summary = data.get("signal_summary", {})
-            signals = data.get("signals", [])   # full signal list with raw_value
+            signals = data.get("signals", [])
             if not summary:
                 return default
 
-            # Parse last_updated date from summary
             last_updated = summary.get("last_updated", "")
             today = datetime.now(timezone.utc).date()
             scored_today = False
@@ -403,7 +369,6 @@ class PipelineClient:
             except (ValueError, AttributeError):
                 pass
 
-            # Build raw_value lookup from signals list (most recent per category)
             raw_by_cat: Dict[str, str] = {}
             for sig in signals:
                 cat = sig.get("category", "")
@@ -412,14 +377,13 @@ class PipelineClient:
 
             result = {}
             for cat, summary_key in SIGNAL_SCORE_KEYS.items():
-                score = summary.get(summary_key)   # None or float
+                score = summary.get(summary_key)
                 is_zero_or_missing = (score is None or score == 0)
                 result[cat] = {
-                    "score":       score,
-                    "raw_value":   raw_by_cat.get(cat),
+                    "score":        score,
+                    "raw_value":    raw_by_cat.get(cat),
                     "scored_today": scored_today,
-                    # Skip only if: scored today AND score is real (> 0)
-                    "should_skip": scored_today and not is_zero_or_missing,
+                    "should_skip":  scored_today and not is_zero_or_missing,
                 }
 
             return result
@@ -435,19 +399,7 @@ class PipelineClient:
     ) -> List[SignalFlag]:
         """
         LLM sanity check — ask Groq whether each signal score is plausible
-        for this specific company.
-
-        Called AFTER all signals complete (skipped or freshly run).
-        Only checks scores that are non-None and non-zero (zeros are already
-        flagged as failures, not sanity issues).
-
-        Uses the signal's raw_value as evidence context so the LLM can reason
-        about the actual data, not just the number.
-
-        Returns a list of SignalFlag — only for scores that seem suspicious
-        (plausible=False). If all scores look fine, returns empty list.
-
-        Never raises — returns empty list on any LLM or network failure.
+        for this specific company. Never raises — returns [] on any failure.
         """
         try:
             import httpx
@@ -474,9 +426,7 @@ class PipelineClient:
         for cat, info in signal_results.items():
             score     = info.get("score")
             raw_value = info.get("raw_value", "")
-            skipped   = info.get("should_skip", False)
 
-            # Only sanity-check scores we actually have (skip None and 0 — already handled)
             if score is None or score == 0:
                 continue
 
@@ -510,7 +460,6 @@ severity guide:
                     "Authorization": f"Bearer {groq_api_key}",
                     "Content-Type": "application/json",
                 }
-                # Use httpx if available, fall back to requests (always available)
                 if _use_httpx:
                     import httpx
                     resp = httpx.post(
@@ -557,31 +506,30 @@ severity guide:
 
         return flags
 
+    # ── Step 5 — Signal Scoring ───────────────────────────────────────────────
+
     def _step_signal_scoring(
         self,
         ticker: str,
         company_name: str = "",
         on_substep: Optional[Callable[[str], None]] = None,
         skip_if_scored_today: bool = True,
+        website: Optional[str] = None,   # ← yfinance-resolved domain for digital_presence
     ) -> PipelineStepResult:
         """
         Selective per-signal scoring with LLM sanity check.
 
         Per-signal skip logic:
-          scored today AND score > 0  →  skip (data unchanged, no point re-running)
-          score == 0 OR None          →  re-run (previous run failed or got bad data)
-          not scored today            →  re-run (stale data)
+          scored today AND score > 0  →  skip
+          score == 0 OR None          →  re-run
+          not scored today            →  re-run
 
-        Signals that need re-running are called individually via their dedicated
-        endpoints and executed concurrently via ThreadPoolExecutor.
-
-        After all signals settle (skipped or freshly run), runs a Groq LLM
-        sanity check on each non-zero score. Suspicious scores are attached as
-        SignalFlag objects — surfaced as ⚠️ in Streamlit but never block the pipeline.
+        website is passed as a query param to the digital_presence endpoint so
+        BuiltWith/Wappalyzer scan the correct domain (e.g. alphabet.com for GOOGL)
+        and Groq subdomain discovery gets the right context.
         """
         start = time.time()
 
-        # ── Per-signal status check ───────────────────────────────────────────
         signal_status = self._get_signal_scores_today(ticker) if skip_if_scored_today else {
             cat: {"score": None, "raw_value": None, "scored_today": False, "should_skip": False}
             for cat in ["technology_hiring", "digital_presence", "innovation_activity", "leadership_signals"]
@@ -614,17 +562,22 @@ severity guide:
             for cat in to_run:
                 on_substep(f"Scoring {CATEGORY_LABELS[cat]}")
 
-        # ── Run only the signals that need it — concurrently ──────────────────
-        fresh_results: Dict[str, Any] = {}   # cat → API response dict
+        fresh_results: Dict[str, Any] = {}
 
         def _call_signal(cat: str) -> tuple[str, Any]:
             endpoint = INDIVIDUAL_ENDPOINTS[cat]
-            # Fresh session per thread — self._session is not thread-safe
             s = requests.Session()
             s.headers.update({"Content-Type": "application/json"})
             try:
+                # Pass website to digital_presence endpoint so the backend can
+                # forward it to TechStackCollector.analyze_company(website=...)
+                params = {}
+                if cat == "digital_presence" and website:
+                    params["website"] = website
+
                 resp = s.post(
                     f"{self.base_url}{endpoint}",
+                    params=params,
                     timeout=REQUEST_TIMEOUT_LONG,
                 )
                 resp.raise_for_status()
@@ -642,8 +595,6 @@ severity guide:
                     cat, result = future.result()
                     fresh_results[cat] = result
 
-        # ── Merge skipped + fresh results into unified signal_results ─────────
-        # signal_results[cat] = {"score": float, "raw_value": str, "source": "skipped"|"fresh"|"failed"}
         merged: Dict[str, Any] = {}
 
         for cat in to_skip:
@@ -662,7 +613,6 @@ severity guide:
                 "source":    "failed" if r.get("status") == "failed" else "fresh",
             }
 
-        # ── Build human-readable summary ──────────────────────────────────────
         parts = []
         for cat, info in merged.items():
             score  = info["score"]
@@ -678,7 +628,6 @@ severity guide:
 
         summary_msg = " | ".join(parts) if parts else "signals processed"
 
-        # ── LLM sanity check on all non-zero scores ───────────────────────────
         flags = self._sanity_check_scores(ticker, company_name or ticker, merged)
 
         if flags:
@@ -688,10 +637,8 @@ severity guide:
             logger.warning(f"[{ticker}] Score flags: {flag_summary}")
             summary_msg += f" | ⚠️ {len(flags)} score(s) flagged"
 
-        # ── Check for any hard failures ───────────────────────────────────────
         failed = [cat for cat, info in merged.items() if info["source"] == "failed"]
         if failed:
-            # Non-fatal: CS3 can still score with partial signals
             logger.warning(f"[{ticker}] Signals failed (will score with partial data): {failed}")
 
         return PipelineStepResult(
@@ -705,25 +652,13 @@ severity guide:
     # ── Step 3 — Parse Documents (NON-FATAL) ──────────────────────────────────
 
     def _step_parse(self, ticker: str, doc_status: Optional[Dict] = None) -> PipelineStepResult:
-        """
-        POST /api/v1/documents/parse/{ticker}
-
-        Smart skip: if the pre-check shows total_documents > 0 AND raw_count == 0,
-        all documents are already parsed — skip the API call entirely.
-        This mirrors how Step 2 skips on HTTP 409 (already exists).
-        """
         start = time.time()
 
-        # Pre-check: skip if nothing needs parsing
-        # raw_count == 0 means no "raw"/"collected"/"pending" keys in by_status
-        # A missing key = truly 0 docs in that state (API only lists non-zero statuses)
         if doc_status:
-            total  = doc_status.get("total_documents", 0)
-            raw    = doc_status.get("raw_count", 0)
-            parsed = doc_status.get("parsed_count", 0)
+            total   = doc_status.get("total_documents", 0)
+            raw     = doc_status.get("raw_count", 0)
+            parsed  = doc_status.get("parsed_count", 0)
             chunked = doc_status.get("chunked_count", 0)
-            # Skip if: docs exist AND nothing is in raw/collected state
-            # (some may be "parsed", some "chunked" — both are fine, nothing left to parse)
             if total > 0 and raw == 0:
                 already_done = parsed + chunked
                 return PipelineStepResult(
@@ -767,24 +702,13 @@ severity guide:
     # ── Step 4 — Chunk Documents (NON-FATAL) ──────────────────────────────────
 
     def _step_chunk(self, ticker: str, doc_status: Optional[Dict] = None) -> PipelineStepResult:
-        """
-        POST /api/v1/documents/chunk/{ticker}
-
-        Smart skip: if the pre-check shows chunked_count > 0 AND raw_count == 0
-        AND parsed_count == 0 (nothing left un-chunked), skip the API call.
-        Uses post-parse doc_status passed in from run_pipeline().
-        """
         start = time.time()
 
-        # Pre-check: skip if nothing needs chunking
-        # parsed_count == 0 means no "parsed" key in by_status (nothing waiting to be chunked)
-        # chunked_count > 0 means at least some docs ARE chunked (not a fresh empty state)
         if doc_status:
             total   = doc_status.get("total_documents", 0)
             chunked = doc_status.get("chunked_count", 0)
-            parsed  = doc_status.get("parsed_count", 0)   # parsed-but-not-yet-chunked
+            parsed  = doc_status.get("parsed_count", 0)
             raw     = doc_status.get("raw_count", 0)
-            # Skip if: docs exist AND nothing is waiting to be chunked (parsed==0 and raw==0)
             if total > 0 and chunked > 0 and parsed == 0 and raw == 0:
                 return PipelineStepResult(
                     step=4, name="Chunk Documents", status="skipped",
@@ -824,11 +748,6 @@ severity guide:
     # ── Step 6 — Glassdoor Culture (NON-FATAL) ────────────────────────────────
 
     def _step_glassdoor(self, ticker: str) -> PipelineStepResult:
-        """
-        POST /api/v1/glassdoor-signals/{ticker}
-        Scrapes Glassdoor/Indeed/CareerBliss → CultureSignal → writes to S3.
-        CS3 scoring reads this at Step 2.5b. Must run BEFORE Step 8.
-        """
         start = time.time()
         try:
             resp = self._session.post(
@@ -861,11 +780,6 @@ severity guide:
     # ── Step 7 — Board Governance (NON-FATAL) ─────────────────────────────────
 
     def _step_board_governance(self, ticker: str) -> PipelineStepResult:
-        """
-        POST /api/v1/board-governance/analyze/{ticker}
-        Parses DEF 14A → board composition → writes to S3.
-        CS3 scoring reads this at Step 2.5a. Must run BEFORE Step 8.
-        """
         start = time.time()
         try:
             resp = self._session.post(
@@ -969,9 +883,13 @@ severity guide:
         on_step_complete: Optional[Callable[[PipelineStepResult], None]] = None,
         on_substep: Optional[Callable[[str, str], None]] = None,
         force_reindex: bool = False,
-        force_rescore: bool = False,   # True = re-run signals even if scored today
+        force_rescore: bool = False,
     ) -> PipelineResult:
         ticker = resolved.ticker
+        # Extract website from resolved company (yfinance provides this)
+        website: Optional[str] = getattr(resolved, "website", None)
+        company_name: str = getattr(resolved, "name", ticker)
+
         steps: List[PipelineStepResult] = []
 
         def substep(step_name: str, msg: str) -> None:
@@ -1007,7 +925,6 @@ severity guide:
             return self._build_result(ticker, steps)
 
         # Step 3 — Parse Documents (NON-FATAL)
-        # Pre-check doc status once — used by both parse and chunk to smart-skip
         if on_step_start: on_step_start("Parse Documents")
         doc_status_pre = self._get_doc_status(ticker)
         s3 = run_step(lambda: self._step_parse(ticker, doc_status=doc_status_pre))
@@ -1015,30 +932,13 @@ severity guide:
             logger.warning("[%s] Parse failed — continuing.", ticker)
 
         # Step 4 — Chunk Documents (NON-FATAL)
-        # Re-check doc status after parse so chunk skip reflects current state
         if on_step_start: on_step_start("Chunk Documents")
         doc_status_post_parse = self._get_doc_status(ticker)
         s4 = run_step(lambda: self._step_chunk(ticker, doc_status=doc_status_post_parse))
         if s4.status == "error":
             logger.warning("[%s] Chunk failed — continuing.", ticker)
 
-        # ── Steps 5 + 6 + 7  — CONCURRENT ────────────────────────────────────
-        #
-        # Signal Scoring (Step 5), Glassdoor (Step 6), and Board Governance (Step 7)
-        # are fully independent — none reads the output of another.
-        # Running them in parallel saves ~90s (Steps 6+7 no longer wait for Step 5).
-        #
-        # Implementation: ThreadPoolExecutor with 3 workers.
-        # Each step makes a blocking HTTP request to the local FastAPI server.
-        # The backend's /signals/score/{ticker}/all now runs its 4 signals in
-        # parallel internally (asyncio.gather), so Step 5 itself is ~4 min, not ~9.
-        #
-        # Step 5 is FATAL — if it errors, abort before Steps 6+7 results matter.
-        # Steps 6+7 are NON-FATAL — their failures are logged but don't stop the run.
-        #
-        # Note: on_step_start callbacks fire before the thread pool starts
-        # (all three step names appear in the UI immediately, then update as done).
-
+        # ── Steps 5 + 6 + 7 — CONCURRENT ─────────────────────────────────────
         if on_step_start:
             on_step_start("Signal Scoring")
             on_step_start("Glassdoor Culture")
@@ -1047,16 +947,16 @@ severity guide:
         _concurrent_results: Dict[str, PipelineStepResult] = {}
 
         def _run_signal():
-            # Each thread gets its own session — requests.Session is NOT thread-safe
             session = requests.Session()
             session.headers.update({"Content-Type": "application/json"})
             self_copy = PipelineClient(self.base_url)
             self_copy._session = session
             return "signal", self_copy._step_signal_scoring(
                 ticker,
-                company_name=resolved.company_name if hasattr(resolved, "company_name") else ticker,
-                on_substep=None,   # Cannot call Streamlit UI from background thread (NoSessionContext)
+                company_name=company_name,
+                on_substep=None,   # Cannot call Streamlit UI from background thread
                 skip_if_scored_today=not force_rescore,
+                website=website,   # ← pass yfinance-resolved domain
             )
 
         def _run_glassdoor():
@@ -1090,7 +990,11 @@ severity guide:
                         f"[{ticker}] Concurrent step '{key}' raised: {exc}\n"
                         f"{traceback.format_exc()}"
                     )
-                    step_map = {"signal": (5, "Signal Scoring"), "glassdoor": (6, "Glassdoor Culture"), "board": (7, "Board Governance")}
+                    step_map = {
+                        "signal":    (5, "Signal Scoring"),
+                        "glassdoor": (6, "Glassdoor Culture"),
+                        "board":     (7, "Board Governance"),
+                    }
                     snum, sname = step_map.get(key, (0, key))
                     _concurrent_results[key] = PipelineStepResult(
                         step=snum, name=sname, status="error",
@@ -1120,7 +1024,6 @@ severity guide:
             logger.warning(f"[{ticker}] Glassdoor failed — culture_change may be lower.")
         if s7.status == "error":
             logger.warning(f"[{ticker}] Board governance failed — board_composition may be missing.")
-        # ── END CONCURRENT ────────────────────────────────────────────────────
 
         # Step 8 — CS3 Scoring (FATAL)
         if on_step_start: on_step_start("Scoring")
@@ -1155,8 +1058,6 @@ severity guide:
         )
         indexed_count = index_step.data.get("indexed_count", 0) if index_step else 0
 
-        # Roll up signal_flags from Step 5 into the top-level result
-        # Streamlit reads pipeline_result.signal_flags directly — no need to dig into steps
         signal_flags = []
         signal_step = next(
             (s for s in steps if s.name == "Signal Scoring"), None
