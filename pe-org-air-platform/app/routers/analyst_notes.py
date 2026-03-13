@@ -1,12 +1,12 @@
 """Analyst Notes API Router (CS4 — Task 8.0d)
 
 Endpoints:
-  POST /api/v1/analyst-notes/{company_id}/interview    — Submit interview transcript
-  POST /api/v1/analyst-notes/{company_id}/dd-finding   — Submit DD finding
-  POST /api/v1/analyst-notes/{company_id}/data-room    — Submit data room summary
-  GET  /api/v1/analyst-notes/{company_id}              — List all notes for company
-  GET  /api/v1/analyst-notes/{company_id}/{note_id}    — Get single note by ID
-  POST /api/v1/analyst-notes/{company_id}/load         — Restore cache from Snowflake
+  POST /api/v1/analyst-notes/{ticker}/interview    — Submit interview transcript
+  POST /api/v1/analyst-notes/{ticker}/dd-finding   — Submit DD finding
+  POST /api/v1/analyst-notes/{ticker}/data-room    — Submit data room summary
+  GET  /api/v1/analyst-notes/{ticker}              — List all notes for company
+  GET  /api/v1/analyst-notes/{ticker}/{note_id}    — Get single note by ID
+  POST /api/v1/analyst-notes/{ticker}/load         — Restore cache from Snowflake
 """
 from __future__ import annotations
 
@@ -16,6 +16,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
+from app.repositories.company_repository import CompanyRepository
 from app.services.collection.analyst_notes import AnalystNotesCollector
 
 logger = logging.getLogger(__name__)
@@ -94,17 +95,21 @@ class ListNotesResponse(BaseModel):
 
 
 # =====================================================================
-# POST /{company_id}/interview — Submit interview transcript
+# POST /{ticker}/interview — Submit interview transcript
 # =====================================================================
 
 @router.post(
-    "/{company_id}/interview",
+    "/{ticker}/interview",
     response_model=NoteSubmittedResponse,
     summary="Submit interview transcript",
     description="Index an interview transcript into ChromaDB, Snowflake, and S3.",
 )
-async def submit_interview(company_id: str, body: SubmitInterviewRequest):
-    company_id = company_id.upper()
+async def submit_interview(ticker: str, body: SubmitInterviewRequest):
+    ticker = ticker.upper()
+    company = CompanyRepository().get_by_ticker(ticker)
+    if company is None:
+        raise HTTPException(status_code=404, detail=f"Company '{ticker}' not found.")
+    company_id = str(company["id"])
     try:
         collector = get_collector()
         note_id = collector.submit_interview(
@@ -131,17 +136,21 @@ async def submit_interview(company_id: str, body: SubmitInterviewRequest):
 
 
 # =====================================================================
-# POST /{company_id}/dd-finding — Submit DD finding
+# POST /{ticker}/dd-finding — Submit DD finding
 # =====================================================================
 
 @router.post(
-    "/{company_id}/dd-finding",
+    "/{ticker}/dd-finding",
     response_model=NoteSubmittedResponse,
     summary="Submit due diligence finding",
     description="Index a DD finding into ChromaDB, Snowflake, and S3.",
 )
-async def submit_dd_finding(company_id: str, body: SubmitDDFindingRequest):
-    company_id = company_id.upper()
+async def submit_dd_finding(ticker: str, body: SubmitDDFindingRequest):
+    ticker = ticker.upper()
+    company = CompanyRepository().get_by_ticker(ticker)
+    if company is None:
+        raise HTTPException(status_code=404, detail=f"Company '{ticker}' not found.")
+    company_id = str(company["id"])
     try:
         collector = get_collector()
         note_id = collector.submit_dd_finding(
@@ -168,17 +177,21 @@ async def submit_dd_finding(company_id: str, body: SubmitDDFindingRequest):
 
 
 # =====================================================================
-# POST /{company_id}/data-room — Submit data room summary
+# POST /{ticker}/data-room — Submit data room summary
 # =====================================================================
 
 @router.post(
-    "/{company_id}/data-room",
+    "/{ticker}/data-room",
     response_model=NoteSubmittedResponse,
     summary="Submit data room document summary",
     description="Index a data room summary into ChromaDB, Snowflake, and S3.",
 )
-async def submit_data_room(company_id: str, body: SubmitDataRoomRequest):
-    company_id = company_id.upper()
+async def submit_data_room(ticker: str, body: SubmitDataRoomRequest):
+    ticker = ticker.upper()
+    company = CompanyRepository().get_by_ticker(ticker)
+    if company is None:
+        raise HTTPException(status_code=404, detail=f"Company '{ticker}' not found.")
+    company_id = str(company["id"])
     try:
         collector = get_collector()
         note_id = collector.submit_data_room_summary(
@@ -204,17 +217,21 @@ async def submit_data_room(company_id: str, body: SubmitDataRoomRequest):
 
 
 # =====================================================================
-# GET /{company_id} — List all notes for company
+# GET /{ticker} — List all notes for company
 # =====================================================================
 
 @router.get(
-    "/{company_id}",
+    "/{ticker}",
     response_model=ListNotesResponse,
     summary="List all analyst notes for a company",
     description="Returns all notes from memory cache (with Snowflake fallback).",
 )
-async def list_notes(company_id: str):
-    company_id = company_id.upper()
+async def list_notes(ticker: str):
+    ticker = ticker.upper()
+    company = CompanyRepository().get_by_ticker(ticker)
+    if company is None:
+        raise HTTPException(status_code=404, detail=f"Company '{ticker}' not found.")
+    company_id = str(company["id"])
     try:
         notes = get_collector().list_notes(company_id)
         return ListNotesResponse(
@@ -242,17 +259,21 @@ async def list_notes(company_id: str):
 
 
 # =====================================================================
-# GET /{company_id}/{note_id} — Get single note
+# GET /{ticker}/{note_id} — Get single note
 # =====================================================================
 
 @router.get(
-    "/{company_id}/{note_id}",
+    "/{ticker}/{note_id}",
     response_model=AnalystNoteOut,
     summary="Get a single analyst note by ID",
     description="Fetches from memory cache first, then Snowflake fallback.",
 )
-async def get_note(company_id: str, note_id: str):
-    company_id = company_id.upper()
+async def get_note(ticker: str, note_id: str):
+    ticker = ticker.upper()
+    company = CompanyRepository().get_by_ticker(ticker)
+    if company is None:
+        raise HTTPException(status_code=404, detail=f"Company '{ticker}' not found.")
+    company_id = str(company["id"])
     try:
         note = get_collector().get_note(note_id)
     except Exception as e:
@@ -277,11 +298,11 @@ async def get_note(company_id: str, note_id: str):
 
 
 # =====================================================================
-# POST /{company_id}/load — Restore cache from Snowflake
+# POST /{ticker}/load — Restore cache from Snowflake
 # =====================================================================
 
 @router.post(
-    "/{company_id}/load",
+    "/{ticker}/load",
     response_model=ListNotesResponse,
     summary="Restore analyst notes cache from Snowflake",
     description=(
@@ -289,8 +310,12 @@ async def get_note(company_id: str, note_id: str):
         "and re-indexes them in ChromaDB. Call this after a server restart."
     ),
 )
-async def load_from_snowflake(company_id: str):
-    company_id = company_id.upper()
+async def load_from_snowflake(ticker: str):
+    ticker = ticker.upper()
+    company = CompanyRepository().get_by_ticker(ticker)
+    if company is None:
+        raise HTTPException(status_code=404, detail=f"Company '{ticker}' not found.")
+    company_id = str(company["id"])
     try:
         notes = get_collector().load_from_snowflake(company_id)
         return ListNotesResponse(
