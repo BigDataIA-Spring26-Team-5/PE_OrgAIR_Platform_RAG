@@ -4,8 +4,9 @@ app/services/tech_signal_service.py
 
 Service layer for digital_presence signals.
 Uses BuiltWith + Wappalyzer to analyze actual company tech stacks.
-Stores results in S3 (raw) + Snowflake (metadata/scores).
+NOW: Uses LLM (Groq) to suggest relevant subdomains based on company lookup.
 
+Stores results in S3 (raw) + Snowflake (metadata/scores).
 NO local file storage. NO job-posting-derived tech data.
 """
 import logging
@@ -18,6 +19,7 @@ from app.services.s3_storage import get_s3_service
 from app.repositories.company_repository import CompanyRepository
 from app.repositories.signal_repository import get_signal_repository
 from app.services.utils import make_singleton_factory
+from app.services.llm.router import get_llm_router
 
 logger = logging.getLogger(__name__)
 
@@ -33,20 +35,108 @@ class TechSignalService(BaseSignalService):
         self.s3 = get_s3_service()
         self.company_repo = CompanyRepository()
         self.signal_repo = get_signal_repository()
+        self.llm_router = get_llm_router()
 
-    # async def _collect(self, ticker: str, company_id: str, company: dict, **kwargs) -> dict:
-    #     result: TechStackResult = await self.collector.analyze_company(
-    #         company_id=company_id,
-    #         ticker=ticker,
-    #         company_name=company.get("name"),
-    #     )
+    def _suggest_subdomains(
+        self, 
+        ticker: str, 
+        company_name: Optional[str], 
+        website: Optional[str]
+    ) -> List[str]:
+        """
+        Use LLM to suggest relevant subdomains for a company based on:
+        - Company name
+        - Ticker
+        - Primary website
+        - Industry context
+        
+        Returns list of subdomain suggestions (e.g., ['careers', 'developers', 'api', 'cloud'])
+        """
+        prompt = f"""You are analyzing the digital presence of a company to find their technology stack.
+
+Company: {company_name or ticker}
+Ticker: {ticker}
+Primary Website: {website or 'unknown'}
+
+Based on this company's likely business model and industry, suggest 5-10 relevant subdomains that might host technical infrastructure, developer tools, APIs, or cloud services.
+
+Examples of good subdomain suggestions:
+- For tech companies: developers, api, cloud, console, dashboard, platform, docs
+- For enterprise software: portal, app, admin, analytics, insights
+- For e-commerce: checkout, cart, shop, store
+- For financial services: secure, online, mobile, wealth, trading
+
+Return ONLY a JSON array of subdomain names (no protocol, no domain):
+["subdomain1", "subdomain2", "subdomain3"]
+
+Be specific to this company's likely digital infrastructure needs."""
+
+        try:
+            response = self.llm_router.complete(
+                task="subdomain_suggestion",
+                messages=[{"role": "user", "content": prompt}],
+            )
+            
+            # Parse JSON response
+            import json
+            response_text = response.strip()
+            # Remove markdown code blocks if present
+            if response_text.startswith("```"):
+                response_text = response_text.split("```")[1]
+                if response_text.startswith("json"):
+                    response_text = response_text[4:]
+            response_text = response_text.strip()
+            
+            subdomains = json.loads(response_text)
+            
+            if isinstance(subdomains, list) and len(subdomains) > 0:
+                logger.info(f"  🤖 LLM suggested {len(subdomains)} subdomains for {ticker}: {subdomains[:3]}...")
+                return subdomains
+            else:
+                logger.warning(f"  ⚠️ LLM returned invalid subdomain list for {ticker}")
+                return self._get_default_subdomains()
+                
+        except Exception as e:
+            logger.warning(f"  ⚠️ LLM subdomain suggestion failed for {ticker}: {e}")
+            return self._get_default_subdomains()
+
+    @staticmethod
+    def _get_default_subdomains() -> List[str]:
+        """Fallback subdomains if LLM suggestion fails."""
+        return [
+            "developers", "api", "cloud", "console", "dashboard",
+            "portal", "app", "platform", "docs", "careers"
+        ]
+
     async def _collect(self, ticker: str, company_id: str, company: dict, **kwargs) -> dict:
+        """
+        Collect tech stack data with LLM-suggested subdomains.
+        
+        Flow:
+        1. Get company context (name, website)
+        2. Use LLM to suggest relevant subdomains
+        3. Pass subdomains to TechStackCollector for BuiltWith analysis
+        4. Analyze and score results
+        """
+        company_name = company.get("name")
+        website = kwargs.get("website")
+        
+        # Get LLM-suggested subdomains for this company (sync call)
+        suggested_subdomains = self._suggest_subdomains(
+            ticker=ticker,
+            company_name=company_name,
+            website=website
+        )
+        
+        # Run tech stack analysis with suggested subdomains
         result: TechStackResult = await self.collector.analyze_company(
             company_id=company_id,
             ticker=ticker,
-            company_name=company.get("name"),
-            website=kwargs.get("website"),   # ← forward from kwargs
+            company_name=company_name,
+            website=website,
+            subdomains=suggested_subdomains,  # ← LLM-powered subdomain list
         )
+        
         self._store_to_s3(ticker, result)
 
         return {
@@ -54,7 +144,7 @@ class TechSignalService(BaseSignalService):
             "signal_date": datetime.now(timezone.utc),
             "raw_value": (
                 f"Tech stack analysis: {len(result.technologies)} techs detected "
-                f"from {result.domain}"
+                f"from {result.domain} (checked {len(suggested_subdomains)} subdomains)"
             ),
             "normalized_score": result.score,
             "confidence": result.confidence,
@@ -67,6 +157,7 @@ class TechSignalService(BaseSignalService):
                 "builtwith_live_count": result.builtwith_total_live,
                 "wappalyzer_tech_count": len(result.wappalyzer_techs),
                 "ai_technologies": [t.name for t in result.technologies if t.is_ai_related],
+                "subdomains_checked": suggested_subdomains,
                 "analysis_sources": self._active_sources(result),
                 "errors": result.errors,
             },
@@ -82,6 +173,7 @@ class TechSignalService(BaseSignalService):
                 "builtwith_live_count": result.builtwith_total_live,
                 "wappalyzer_tech_count": len(result.wappalyzer_techs),
                 "ai_technologies": [t.name for t in result.technologies if t.is_ai_related],
+                "subdomains_analyzed": len(suggested_subdomains),
             },
             "data_sources": self._active_sources(result),
             "collected_at": result.collected_at,
@@ -102,20 +194,18 @@ class TechSignalService(BaseSignalService):
             "errors": result["errors"],
         }
 
-    # async def analyze_company(self, ticker: str, force_refresh: bool = False) -> Dict[str, Any]:
     async def analyze_company(
         self,
         ticker: str,
         force_refresh: bool = False,
-        website: Optional[str] = None,    # ← add this
+        website: Optional[str] = None,
     ) -> Dict[str, Any]:
         ticker = ticker.upper()
         logger.info("=" * 60)
         logger.info(f"🌐 ANALYZING DIGITAL PRESENCE FOR: {ticker}")
         logger.info("=" * 60)
         try:
-            # result = await super().analyze_company(ticker)
-            result = await super().analyze_company(ticker, website=website)  # ← add this
+            result = await super().analyze_company(ticker, website=website)
             logger.info("=" * 60)
             logger.info(f"📊 DIGITAL PRESENCE COMPLETE: {ticker}")
             logger.info("=" * 60)
