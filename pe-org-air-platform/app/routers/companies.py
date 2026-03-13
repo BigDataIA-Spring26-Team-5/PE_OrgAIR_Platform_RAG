@@ -109,6 +109,34 @@ class PaginatedCompanyResponse(BaseModel):
     cache: Optional[CacheInfo] = None
 
 
+BACKFILL_DEFAULT_TICKERS = [
+        "CAT","DE","UNH","HCA","ADP","PAYX","WMT","TGT","DG","JPM","GS","NVDA","GE","NFLX","GOOGL","AAPL"
+]
+
+
+class BackfillRequest(BaseModel):
+    tickers: List[str] = Field(
+        default=BACKFILL_DEFAULT_TICKERS,
+        description="Ticker symbols to backfill from yfinance",
+        example=BACKFILL_DEFAULT_TICKERS,
+    )
+
+
+class BackfillResult(BaseModel):
+    ticker: str
+    status: str  # "created" | "updated" | "skipped" | "failed"
+    company: Optional[CompanyResponse] = None
+    message: str = ""
+
+
+class BackfillResponse(BaseModel):
+    results: List[BackfillResult]
+    created: int
+    updated: int
+    skipped: int
+    failed: int
+
+
 
 #  Exception Helpers
 
@@ -231,6 +259,70 @@ def _enrich_company_in_background(company_id: UUID, ticker: str, name: str, comp
         logger.warning("Groq enrichment background task failed for %s: %s", ticker, exc)
 
 
+def _resolve_and_backfill_ticker(ticker: str, company_repo: CompanyRepository) -> BackfillResult:
+    """Resolve ticker via yfinance (app.utils.company_resolver) and upsert into Snowflake.
+    Overwrites enriched columns with the latest yfinance data.
+    """
+    from app.utils.company_resolver import resolve_company
+    try:
+        resolved = resolve_company(ticker)
+
+        # Fail early if yfinance didn't return usable data
+        if resolved.resolved_from != "yfinance":
+            msg = "; ".join(resolved.warnings) if resolved.warnings else f"yfinance returned no data for {ticker}"
+            return BackfillResult(ticker=ticker, status="failed", message=msg)
+
+        existing = company_repo.get_by_ticker(resolved.ticker)
+
+        if existing is None:
+            data = company_repo.create(
+                name=resolved.name,
+                industry_id=UUID(resolved.industry_id),
+                ticker=resolved.ticker,
+                position_factor=resolved.position_factor,
+                sector=resolved.sector,
+                sub_sector=resolved.sub_sector,
+                market_cap_percentile=resolved.market_cap_percentile,
+                revenue_millions=resolved.revenue_millions,
+                employee_count=resolved.employee_count,
+                fiscal_year_end=resolved.fiscal_year_end,
+            )
+            invalidate_company_cache()
+            return BackfillResult(
+                ticker=resolved.ticker, status="created",
+                company=row_to_response(data),
+                message=f"Created (confidence={resolved.confidence})",
+            )
+
+        # Exists — overwrite all enriched columns with fresh yfinance data
+        updates = {}
+        for field_name in ["sector", "sub_sector", "market_cap_percentile",
+                           "revenue_millions", "employee_count", "fiscal_year_end"]:
+            val = getattr(resolved, field_name)
+            if val is not None:
+                updates[field_name] = val
+
+        if not updates:
+            return BackfillResult(
+                ticker=resolved.ticker, status="skipped",
+                company=row_to_response(existing),
+                message="yfinance returned no enriched fields",
+            )
+
+        company_id = UUID(str(existing["id"]))
+        company_repo.update_enriched_fields(company_id, **updates)
+        invalidate_company_cache(company_id)
+        updated_data = company_repo.get_by_id(company_id)
+        return BackfillResult(
+            ticker=resolved.ticker, status="updated",
+            company=row_to_response(updated_data),
+            message=f"Updated fields: {', '.join(updates.keys())}",
+        )
+    except Exception as exc:
+        logger.warning("backfill_failed ticker=%s error=%s", ticker, exc)
+        return BackfillResult(ticker=ticker, status="failed", message=str(exc))
+
+
 @router.post(
     "/companies",
     response_model=CompanyResponse,
@@ -274,6 +366,46 @@ async def create_company(
     invalidate_company_cache()
 
     return row_to_response(company_data)
+
+
+@router.post(
+    "/companies/backfill",
+    response_model=BackfillResponse,
+    summary="Bulk backfill companies from yfinance",
+    description=(
+        "Fetches financial metadata from yfinance for each ticker and upserts into Snowflake. "
+        "Creates the company if it doesn't exist; if it exists, only fills NULL columns. "
+        "Already-populated fields are never overwritten."
+    ),
+)
+async def backfill_companies(
+    request: BackfillRequest,
+    company_repo: CompanyRepository = Depends(get_company_repository),
+) -> BackfillResponse:
+    results = [_resolve_and_backfill_ticker(t.upper(), company_repo) for t in request.tickers]
+    return BackfillResponse(
+        results=results,
+        created=sum(1 for r in results if r.status == "created"),
+        updated=sum(1 for r in results if r.status == "updated"),
+        skipped=sum(1 for r in results if r.status == "skipped"),
+        failed=sum(1 for r in results if r.status == "failed"),
+    )
+
+
+@router.post(
+    "/companies/{ticker}/backfill",
+    response_model=BackfillResult,
+    summary="Backfill a single company from yfinance",
+    description=(
+        "Fetches yfinance metadata for the given ticker and upserts into Snowflake. "
+        "Creates the company if absent; otherwise fills only NULL columns."
+    ),
+)
+async def backfill_company(
+    ticker: str,
+    company_repo: CompanyRepository = Depends(get_company_repository),
+) -> BackfillResult:
+    return _resolve_and_backfill_ticker(ticker.upper(), company_repo)
 
 
 @router.get(

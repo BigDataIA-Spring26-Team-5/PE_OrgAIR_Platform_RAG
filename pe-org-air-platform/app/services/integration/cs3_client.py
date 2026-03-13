@@ -10,6 +10,12 @@ import httpx
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
+from app.prompts.rag_prompts import (
+    CS3_KEYWORD_EXPANSION_USER,
+    CS3_SCORE_ESTIMATION_USER,
+    CS3_COMPANY_ENRICHMENT_USER,
+)
+
 logger = logging.getLogger(__name__)
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
@@ -212,12 +218,10 @@ async def expand_keywords(ticker: str, dimension_name: str) -> List[str]:
     """
     norm = _DIM_ALIAS_MAP.get(dimension_name, dimension_name)
     base = _BASE_KEYWORDS.get(norm, [])
-    prompt = (
-        f"You are a PE analyst. For '{ticker}', list 10 additional keywords/phrases "
-        f"(comma-separated) that appear in SEC filings, earnings calls, or analyst reports "
-        f"when evaluating the '{dimension_name}' AI-readiness dimension. "
-        f"Base keywords: {', '.join(base)}. "
-        f"Return ONLY comma-separated keywords."
+    prompt = CS3_KEYWORD_EXPANSION_USER.format(
+        ticker=ticker,
+        dimension_name=dimension_name,
+        base_keywords=", ".join(base),
     )
     text = await _groq_post(prompt, max_tokens=200)
     if not text:
@@ -235,14 +239,11 @@ async def estimate_missing_score(ticker: str, dimension_name: str, company_name:
     dim_label = dimension_name.replace("_", " ").title()
     name_hint = f"({company_name})" if company_name else ""
     rubric_data = _RUBRIC_TEXT.get(norm, {})
-    prompt = (
-        f"You are a senior PE analyst assessing AI readiness. "
-        f"For the company with ticker '{ticker}' {name_hint}, estimate a score (0–100) "
-        f"for the '{dim_label}' dimension based on publicly available information. "
-        f"Respond in this exact JSON format:\n"
-        f'{{"score": <0-100>, "confidence": <0.0-1.0>, "rationale": "<2-3 sentences>", '
-        f'"keywords": ["kw1", "kw2", "kw3", "kw4", "kw5"]}}\n'
-        f"Base your estimate on the rubric: {json.dumps(rubric_data)}"
+    prompt = CS3_SCORE_ESTIMATION_USER.format(
+        ticker=ticker,
+        name_hint=name_hint,
+        dim_label=dim_label,
+        rubric_data=json.dumps(rubric_data),
     )
     text = await _groq_post(prompt, max_tokens=400, temperature=0.4)
     estimated_score = 0.0
@@ -285,13 +286,9 @@ async def enrich_company_fields(ticker: str, company_name: str) -> Dict[str, Any
     Use Groq to fill in missing company metadata fields
     (sector, sub_sector, revenue, employee_count, fiscal_year_end).
     """
-    prompt = (
-        f"For the public company with ticker '{ticker}' (name: '{company_name}'), "
-        f"provide the following in JSON format:\n"
-        f'{{"sector": "<sector>", "sub_sector": "<sub_sector>", '
-        f'"revenue_millions": <number or null>, "employee_count": <integer or null>, '
-        f'"fiscal_year_end": "<MM-DD or null>"}}\n'
-        f"Use your knowledge of the company. Return ONLY valid JSON."
+    prompt = CS3_COMPANY_ENRICHMENT_USER.format(
+        ticker=ticker,
+        company_name=company_name,
     )
     text = await _groq_post(prompt, max_tokens=200, temperature=0.2)
     if not text:

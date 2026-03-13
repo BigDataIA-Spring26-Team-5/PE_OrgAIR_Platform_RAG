@@ -10,19 +10,7 @@ from typing import List, Dict, Any, Optional
 
 from app.services.retrieval.hybrid import HybridRetriever, RetrievedDocument
 from app.services.llm.router import ModelRouter
-
-_HYDE_PROMPT_TEMPLATE = """You are an expert private equity analyst specializing in AI readiness assessment.
-
-Write a detailed passage (150–200 words) that would appear in a {source_type} for a company
-scoring at Level 4 ("Good", 60–79) on the '{dimension}' dimension of AI readiness.
-
-Company context: {company_context}
-
-The passage should use specific, concrete language about {dimension} capabilities,
-technologies, and practices. Include specific metrics, tools, or initiatives where appropriate.
-Do NOT include headers or bullet points — write as flowing prose.
-
-Passage:"""
+from app.prompts.rag_prompts import HYDE_SYSTEM, HYDE_TEMPLATE
 
 
 class HyDERetriever:
@@ -59,13 +47,13 @@ class HyDERetriever:
         since this is an intermediate retrieval step, not a final IC output.
         Falls back to the original query on any failure.
         """
-        prompt = _HYDE_PROMPT_TEMPLATE.format(
+        prompt = HYDE_TEMPLATE.format(
             source_type="SEC 10-K filing or analyst report",
             dimension=dimension or "AI readiness",
             company_context=company_context or "a large-cap technology company",
         )
         messages = [
-            {"role": "system", "content": "You write realistic financial document excerpts."},
+            {"role": "system", "content": HYDE_SYSTEM},
             {"role": "user", "content": prompt},
         ]
         try:

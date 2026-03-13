@@ -17,9 +17,19 @@ from app.services.retrieval.hyde import HyDERetriever
 from app.services.justification.generator import JustificationGenerator
 from app.services.workflows.ic_prep import ICPrepWorkflow
 from app.services.llm.router import ModelRouter
+from app.prompts.rag_prompts import (
+    DIM_DETECTION_SYSTEM,
+    DIM_DETECTION_USER,
+    CHATBOT_SYSTEM,
+    CHATBOT_USER,
+)
 import structlog
+from app.guardrails.input_guards import validate_ticker, validate_question, validate_dimension
+from app.guardrails.output_guards import check_answer_length, check_answer_grounded, check_no_refusal
 
 logger = structlog.get_logger(__name__)
+
+MAX_CONTEXT_CHARS = 6000
 
 router = APIRouter(prefix="/rag", tags=["CS4 RAG"])
 
@@ -170,21 +180,15 @@ async def _detect_dimension_with_llm(
     messages = [
         {
             "role": "system",
-            "content": (
-                "You are a PE investment analyst. Your job is to classify investment "
-                "committee questions into AI readiness dimensions.\n"
-                "Respond with ONLY the dimension key — no explanation, no punctuation.\n"
-                "Valid dimension keys:\n"
-                + "\n".join(f"  {d}" for d in valid_dims)
+            "content": DIM_DETECTION_SYSTEM.format(
+                valid_dims="\n".join(f"  {d}" for d in valid_dims)
             ),
         },
         {
             "role": "user",
-            "content": (
-                f"Question: {question}\n\n"
-                f"Dimension definitions:\n{dim_list}\n\n"
-                "Which single dimension best matches this question? "
-                "Reply with only the dimension key."
+            "content": DIM_DETECTION_USER.format(
+                question=question,
+                dim_list=dim_list,
             ),
         },
     ]
@@ -900,6 +904,21 @@ async def chatbot_query(
     FIX 2: broad questions return (None, 0.0) → no dimension lock
     FIX 3: improved system prompt — strengths first, then gaps, always conclude
     """
+    result = validate_ticker(ticker)
+    if not result.passed:
+        logger.warning("rag.guardrail_blocked", guard="validate_ticker", reason=result.reason)
+        raise HTTPException(status_code=400, detail=result.reason)
+
+    result = validate_question(question)
+    if not result.passed:
+        logger.warning("rag.guardrail_blocked", guard="validate_question", reason=result.reason)
+        raise HTTPException(status_code=400, detail=result.reason)
+
+    result = validate_dimension(dimension)
+    if not result.passed:
+        logger.warning("rag.guardrail_blocked", guard="validate_dimension", reason=result.reason)
+        raise HTTPException(status_code=400, detail=result.reason)
+
     logger.info("rag.chatbot_query", ticker=ticker, question_len=len(question))
     retriever = _get_retriever()
     llm_router = _get_router()
@@ -978,7 +997,9 @@ async def chatbot_query(
 
     context = "\n\n---\n\n".join(context_parts)
 
-    # ── Enrich context with structured score data ─────────────────────────────
+    if len(context) > MAX_CONTEXT_CHARS:
+        context = context[:MAX_CONTEXT_CHARS] + "\n\n[Context truncated to fit token budget.]"
+
     # ── Enrich context with structured score data ─────────────────────────────
     # Direct Snowflake/S3 calls — NO HTTP self-requests (avoids deadlock)
     score_context = ""
@@ -1037,41 +1058,20 @@ async def chatbot_query(
         dim_label = detected_dimension.replace("_", " ").title()
         dim_instruction = f" Focus your answer on the {dim_label} dimension of AI readiness."
 
+    score_section = f"Structured scores:\n{score_context}\n\n" if score_context else ""
+
     messages = [
         {
             "role": "system",
-            "content": (
-                "You are a senior PE investment analyst preparing IC materials for "
-                "an AI-readiness assessment. Answer questions based on the provided "
-                "evidence excerpts AND structured score data.\n\n"
-                "Rules:\n"
-                "1. USE THE SCORE DATA — when dimension scores, signal scores, or "
-                "culture breakdowns are provided, reference them with specific numbers. "
-                "Example: 'MSFT scores 84.0/100 on Data Infrastructure, driven by...'\n"
-                "2. Cite evidence sources: 'per SEC 10-K Item 1', 'per Glassdoor reviews', "
-                "'per job posting data', 'per USPTO patents'.\n"
-                "3. START with strengths and concrete capabilities before discussing "
-                "risks or gaps.\n"
-                "4. Be specific and quantitative — use numbers from scores and evidence.\n"
-                "5. Always end with a 1-2 sentence IC recommendation or conclusion.\n"
-                "6. If asked about comparisons to competitors and only one company's "
-                "data is available, assess the company's absolute position and note "
-                "that peer comparison would require additional data.\n"
-                "7. For 'why does X score Y' questions, explain which signals and "
-                "evidence sources drive the score using the dimension and signal data.\n"
-                "8. Keep answers concise — 4-6 sentences maximum. No bullet points "
-                "unless explicitly asked."
-                + dim_instruction
-            ),
+            "content": CHATBOT_SYSTEM.format(dim_instruction=dim_instruction),
         },
         {
             "role": "user",
-            "content": (
-                f"Company: {ticker}\n\n"
-                f"Evidence excerpts:\n{context}\n\n"
-                + (f"Structured scores:\n{score_context}\n\n" if score_context else "")
-                + f"Question: {question}\n\n"
-                "Provide a concise, balanced IC-quality answer with specific numbers and citations:"
+            "content": CHATBOT_USER.format(
+                ticker=ticker,
+                context=context,
+                score_section=score_section,
+                question=question,
             ),
         },
     ]
@@ -1097,6 +1097,13 @@ async def chatbot_query(
     except Exception as e:
         logger.error("rag.chatbot_llm_error", ticker=ticker, error=str(e))
         answer = f"Evidence retrieved but could not generate answer: {e}"
+
+    answer = check_no_refusal(answer)
+    answer = check_answer_grounded(answer, results_sorted[:4])
+    length_result = check_answer_length(answer)
+    if not length_result.passed:
+        logger.warning("rag.guardrail_blocked", guard="check_answer_length", reason=length_result.reason)
+        answer = f"[Guard: answer quality check failed — {length_result.reason}]"
 
     return {
         "answer": answer,

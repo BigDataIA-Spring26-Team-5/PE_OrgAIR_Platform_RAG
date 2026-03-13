@@ -8,13 +8,13 @@ services:
     ports:
       - "8000:8000"
     env_file:
-      - .env  # Simpler: loads all variables from .env file
+      - .env
     environment:
-      - REDIS_URL=redis://redis:6379/0  # Override to use Docker network
+      - REDIS_URL=redis://redis:6379/0
     volumes:
       - ./app:/app/app
-      - ./data:/app/data  # Mount local data folder to container
-      - ./chroma_data:/app/chroma_data  # Persist ChromaDB across restarts
+      - ./data:/app/data
+      - ./chroma_data:/app/chroma_data
     depends_on:
       redis:
         condition: service_healthy
@@ -45,9 +45,45 @@ services:
     networks:
       - pe_orgair_network
 
+  # Airflow Orchestrator
+  airflow:
+    image: apache/airflow:2.9.3
+    container_name: pe_orgair_platform_airflow
+    depends_on:
+      redis:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    environment:
+      - AIRFLOW__CORE__DAGS_FOLDER=/opt/airflow/dags
+      - AIRFLOW__CORE__LOAD_EXAMPLES=False
+      - AIRFLOW__CORE__EXECUTOR=SequentialExecutor
+      - AIRFLOW__CORE__FERNET_KEY=${AIRFLOW_FERNET_KEY:-}
+      - AIRFLOW__WEBSERVER__SECRET_KEY=${AIRFLOW_SECRET_KEY:-pe-platform-secret}
+      - _AIRFLOW_WWW_USER_CREATE=true
+      - _AIRFLOW_WWW_USER_USERNAME=admin
+      - _AIRFLOW_WWW_USER_PASSWORD=${AIRFLOW_ADMIN_PASSWORD:-admin}
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - airflow_data:/opt/airflow
+    command: standalone
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    networks:
+      - pe_orgair_network
+
 networks:
   pe_orgair_network:
     driver: bridge
 
 volumes:
   redis_data:
+  airflow_data:
+    name: pe_rag_airflow

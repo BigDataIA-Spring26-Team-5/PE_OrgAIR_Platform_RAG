@@ -463,3 +463,4 @@ def format_resolution_preview(company: ResolvedCompany) -> str:
     for w in company.warnings:
         lines.append(f"⚠️ {w}")
     return "\n".join(lines)
+
