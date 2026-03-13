@@ -125,10 +125,6 @@ _COMMON_WORDS = {"ai", "the", "and", "for", "with", "model", "data", "digital", 
 _DIM_CONFIDENCE_THRESHOLD = 0.12
 
 # ── LLM dimension detection ────────────────────────────────────────────────────
-# Human-readable descriptions used as context for the LLM classifier.
-# These are intentionally technology-agnostic so they work for any company —
-# the LLM maps company-specific terms (CUDA, Hopper, H100, DGX) to dimensions
-# without needing those terms in any keyword list.
 _DIMENSION_DESCRIPTIONS: Dict[str, str] = {
     "data_infrastructure": (
         "Data platforms, cloud pipelines, databases, data lakes, ETL/ELT workflows, "
@@ -168,26 +164,13 @@ _DIMENSION_DESCRIPTIONS: Dict[str, str] = {
 }
 
 
-def _detect_dimension_with_llm(
+async def _detect_dimension_with_llm(
     question: str,
     router: ModelRouter,
 ) -> tuple[Optional[str], float]:
-    """LLM-assisted dimension detection for company-specific or ambiguous queries.
-
-    Called when keyword scoring confidence is below _DIM_CONFIDENCE_THRESHOLD.
-    Uses Groq (fast, cheap — "keyword_matching" task) to map any question to one
-    of the 7 CS3 dimensions by semantic understanding, not keyword matching.
-
-    This handles company-specific terminology that keyword matching misses:
-      - "What CUDA products does NVDA have?" → technology_stack
-      - "What AI products does NVDA have in production?" → use_case_portfolio
-      - "What is GOOGL's Gemini strategy?" → use_case_portfolio
-      - "How does NVDA use Hopper architecture?" → technology_stack
-
-    Returns (dimension_key, 0.75) on success.
-    Returns (None, 0.0) on any failure — caller falls back gracefully.
-    The 0.75 confidence is intentionally below 1.0 to signal LLM-detected
-    (vs caller-supplied dimension = 1.0) but above threshold to trigger enrichment.
+    """
+    LLM-assisted dimension detection for company-specific or ambiguous queries.
+    FIX: Now async — properly awaits router.complete().
     """
     valid_dims = set(_DIMENSION_DESCRIPTIONS.keys())
     dim_list = "\n".join(
@@ -210,14 +193,14 @@ def _detect_dimension_with_llm(
         },
     ]
     try:
-        # "keyword_matching" routes to Groq — fast and cheap, appropriate for
-        # this classification step (not a quality-critical IC output)
-        raw = router.complete("keyword_matching", messages)
-        detected = raw.strip().lower().replace('"', "").replace("'", "").split()[0]
+        raw = await router.complete("keyword_matching", messages)
+        if hasattr(raw, "choices"):
+            raw = raw.choices[0].message.content
+        raw = str(raw).strip()
+        detected = raw.lower().replace('"', "").replace("'", "").split()[0]
         if detected in valid_dims:
             logger.info("rag.llm_dim_detected", question=question[:80], dimension=detected)
             return detected, 0.75
-        # LLM returned something unexpected — log and fall back
         logger.warning(
             "rag.llm_dim_invalid_response",
             question=question[:80],
@@ -233,37 +216,46 @@ def _detect_dimension_scored(question: str) -> tuple[Optional[str], float]:
     """
     Weighted dimension detection.
 
-    Priority order:
-    1. Gap/weakness questions → ai_governance (Item 1A risk factors)
-    2. Talent/hiring questions → talent (job postings)
-    3. Score justification questions → extract dimension from question text
-    4. Broad readiness/overall/strengths → use_case_portfolio
-    5. Weighted keyword overlap across all 7 dimensions
-    6. No strong signal → (None, 0.0) — caller should invoke LLM fallback
+    FIX: Broad/overall/strengths questions now return (None, 0.0)
+    so retrieval happens across ALL dimensions — not locked to one.
     """
     q_lower = question.lower()
     q_words = set(q_lower.split())
 
-    # Priority 1: gap/weakness/risk questions → Item 1A (Risk Factors)
     _GAP_TRIGGERS = {
         "gaps", "gap", "weaknesses", "weakness", "risks", "risk",
         "missing", "lacking", "improve", "improvement", "challenge",
         "challenges", "concerns", "concern", "shortcoming", "shortcomings",
-        "threats", "threat", "competitive", "competition",
+        "threats", "threat",
     }
-    if q_words & _GAP_TRIGGERS:
+    _BROAD_TRIGGERS = {
+        "overall", "readiness", "assessment", "strengths", "strength",
+        "summary", "overview", "evaluate", "evaluation", "prepare",
+        "investment", "committee", "general", "biggest", "compared",
+        "competitors", "competitive", "versus", "vs",
+    }
+
+    has_gap = bool(q_words & _GAP_TRIGGERS)
+    has_broad = bool(q_words & _BROAD_TRIGGERS)
+
+    # If BOTH gap and broad words → treat as broad (retrieve everything)
+    if has_gap and has_broad:
+        return None, 0.0
+
+    # Pure gap question → ai_governance
+    if has_gap and not has_broad:
         return "ai_governance", 0.30
 
-    # Priority 2: talent/hiring questions → talent dimension → job postings
+    # Priority 2: talent/hiring — only if not also broad
     _TALENT_TRIGGERS = {
         "talent", "hiring", "hire", "recruitment", "engineers", "employees",
         "workforce", "headcount", "jobs", "job", "postings", "roles",
-        "data scientists", "ml engineers", "staff", "team",
+        "staff", "team",
     }
-    if q_words & _TALENT_TRIGGERS:
+    if q_words & _TALENT_TRIGGERS and not has_broad:
         return "talent", 0.35
 
-    # Priority 3: score justification questions → route to correct dimension
+    # Priority 3: score justification
     _SCORE_TRIGGERS = {"score", "scored", "scoring", "why", "justify", "justification"}
     if q_words & _SCORE_TRIGGERS:
         for dim in DIMENSION_QUERY_MAP:
@@ -271,14 +263,9 @@ def _detect_dimension_scored(question: str) -> tuple[Optional[str], float]:
             if dim_words & q_words:
                 return dim, 0.50
 
-    # Priority 4: broad assessment questions → use_case_portfolio
-    _BROAD_TRIGGERS = {
-        "overall", "readiness", "assessment", "strengths", "strength",
-        "summary", "overview", "evaluate", "evaluation", "prepare",
-        "investment", "committee", "score", "rating", "general",
-    }
-    if q_words & _BROAD_TRIGGERS:
-        return "use_case_portfolio", 0.20
+    # Priority 4: broad → NO dimension lock, retrieve across everything
+    if has_broad:
+        return None, 0.0
 
     # Priority 5: weighted keyword overlap
     best_dim: Optional[str] = None
@@ -344,47 +331,114 @@ async def _retrieve_with_fallback(
     """
     Retrieve with graceful dimension-filter fallback.
 
-    Steps:
-    1. Dimension-filtered search (enriched query only if dim_confidence is high)
-    2. Source-affinity fallback if too few results — always prefers SEC sources
-       for governance/leadership/use_case_portfolio dimensions
-    3. Ticker-only with raw query as final fallback
-
-    SEC source priority: for non-culture, non-talent dimensions, SEC filings
-    are always tried before falling back to ticker-only. This prevents
-    Glassdoor reviews from dominating broad/gap questions.
+    FIX: When dimension is None (broad questions), retrieves across ALL
+    source types to give balanced evidence from SEC, jobs, Glassdoor, patents.
     """
-    # Talent dimension — always force job postings, bypass dimension filter
+    # Talent dimension — force job postings via direct vector store search
     if dimension == "talent":
+        vs = _get_vector_store()
         talent_query = (
             "machine learning AI engineer data scientist MLOps deep learning "
-            "generative AI LLM hiring " + query
+            "generative AI LLM hiring software engineer " + query
         )
-        filter_jobs = _build_filter(
-            ticker,
+        # Try job postings first
+        job_results = vs.search(
+            query=talent_query, top_k=top_k,
+            ticker=ticker,
             source_types=["job_posting_indeed", "job_posting_linkedin"],
         )
-        job_results = retriever.retrieve(talent_query, k=top_k, filter_metadata=filter_jobs)
         if len(job_results) >= min_results:
             return job_results
-        filter_jobs_gd = _build_filter(
-            ticker,
-            source_types=["job_posting_indeed", "job_posting_linkedin", "glassdoor_review"],
+        # Add glassdoor if not enough jobs
+        gd_results = vs.search(
+            query=talent_query, top_k=top_k,
+            ticker=ticker,
+            source_types=["glassdoor_review"],
         )
-        job_results = retriever.retrieve(talent_query, k=top_k, filter_metadata=filter_jobs_gd)
-        if len(job_results) >= min_results:
-            return job_results
+        combined = list(job_results) + list(gd_results)
+        if combined:
+            seen = set()
+            deduped = []
+            for r in sorted(combined, key=lambda x: x.score, reverse=True):
+                if r.doc_id not in seen:
+                    seen.add(r.doc_id)
+                    deduped.append(r)
+            return deduped[:top_k]
 
-    # Culture dimension — always go to Glassdoor first
+    # Culture dimension — force Glassdoor via direct vector store search
     if dimension == "culture":
-        filter_culture = _build_filter(ticker, source_types=["glassdoor_review"])
-        culture_results = retriever.retrieve(query, k=top_k, filter_metadata=filter_culture)
+        vs = _get_vector_store()
+        culture_results = vs.search(
+            query=query, top_k=top_k,
+            ticker=ticker,
+            source_types=["glassdoor_review"],
+        )
         if len(culture_results) >= min_results:
             return culture_results
 
+    # ── BROAD QUESTIONS (dimension=None) — pull diverse evidence mix ──────────
+    if dimension is None:
+        # For broad questions, pull from diverse sources using DENSE search only
+        # (skip BM25 which may be under-seeded). Use the vector store directly
+        # for faster, more reliable results across source types.
+        vs = _get_vector_store()
+
+        source_groups = [
+            ["sec_10k_item_1"],
+            ["sec_10k_item_7"],
+            ["sec_10k_item_1a"],
+            ["board_proxy_def14a"],
+            ["job_posting_indeed", "job_posting_linkedin"],
+            ["glassdoor_review"],
+            ["patent_uspto"],
+        ]
+        diverse_results = []
+        per_group = max(2, top_k // len(source_groups))
+
+        for src_types in source_groups:
+            try:
+                group_results = vs.search(
+                    query=query,
+                    top_k=per_group,
+                    ticker=ticker,
+                    source_types=src_types,
+                )
+                for r in group_results:
+                    diverse_results.append(r)
+            except Exception:
+                continue
+
+        if len(diverse_results) >= min_results:
+            # Deduplicate by doc_id, sort by score, return top_k
+            # Convert SearchResult from vector_store to RetrievedDocument format
+            seen = set()
+            deduped = []
+            for r in sorted(diverse_results, key=lambda x: x.score, reverse=True):
+                if r.doc_id not in seen:
+                    seen.add(r.doc_id)
+                    # Wrap in a simple object with same interface as HybridRetriever results
+                    from dataclasses import dataclass as _dc, field as _f
+                    @_dc
+                    class _BroadResult:
+                        doc_id: str = ""
+                        content: str = ""
+                        metadata: dict = _f(default_factory=dict)
+                        score: float = 0.0
+                        retrieval_method: str = "dense_diverse"
+                    deduped.append(_BroadResult(
+                        doc_id=r.doc_id,
+                        content=r.content,
+                        metadata=r.metadata,
+                        score=r.score,
+                        retrieval_method="dense_diverse",
+                    ))
+            if deduped:
+                return deduped[:top_k]
+
+        # If diverse retrieval got too few, fall through to ticker-only below
+
     results = []
 
-    # SEC-authoritative dimensions — always try SEC sources first
     _SEC_PRIMARY_DIMS = {
         "data_infrastructure", "ai_governance", "technology_stack",
         "leadership", "use_case_portfolio",
@@ -405,19 +459,20 @@ async def _retrieve_with_fallback(
 
         logger.info(
             "rag.fallback_triggered",
-            ticker=ticker,
-            dimension=dimension,
-            dim_confidence=dim_confidence,
-            dim_results=len(results),
+            ticker=ticker, dimension=dimension,
+            dim_confidence=dim_confidence, dim_results=len(results),
             reason="too_few_dim_results",
         )
 
-        # Step 2a: For SEC-primary dimensions, force SEC source affinity
+        # SEC source affinity for SEC-primary dimensions
+        # FIX: prioritize Item 1 and Item 7 over Item 1A for non-governance dims
         if dimension in _SEC_PRIMARY_DIMS:
-            sec_sources = [
-                "sec_10k_item_1", "sec_10k_item_1a",
-                "sec_10k_item_7", "board_proxy_def14a",
-            ]
+            if dimension == "ai_governance":
+                sec_sources = ["sec_10k_item_1a", "board_proxy_def14a"]
+            else:
+                # Item 1 (Business) and Item 7 (MD&A) have capabilities/strategy
+                # Item 1A (Risk) only has risk language — deprioritize for strengths
+                sec_sources = ["sec_10k_item_1", "sec_10k_item_7", "board_proxy_def14a"]
             filter_sec = _build_filter(ticker, source_types=sec_sources)
             sec_results = retriever.retrieve(enriched_query, k=top_k, filter_metadata=filter_sec)
             if len(sec_results) > len(results):
@@ -425,7 +480,7 @@ async def _retrieve_with_fallback(
             if len(results) >= min_results:
                 return results
 
-        # Step 2b: General source affinity fallback
+        # General source affinity fallback
         affinity_sources = DIMENSION_SOURCE_AFFINITY.get(dimension, [])
         if affinity_sources:
             filter_src = _build_filter(ticker, source_types=affinity_sources)
@@ -436,12 +491,12 @@ async def _retrieve_with_fallback(
         if len(results) >= min_results:
             return results
 
-    # Step 3: ticker-only — use raw query, no dimension pollution
+    # Ticker-only fallback — raw query, no dimension pollution
     filter_ticker_only = _build_filter(ticker)
     fallback = retriever.retrieve(query, k=top_k, filter_metadata=filter_ticker_only)
 
-    # If dimension is SEC-primary and fallback returns non-SEC, force SEC
-    if dimension in _SEC_PRIMARY_DIMS and fallback:
+    # For SEC-primary dims, prefer SEC results even in fallback
+    if dimension and dimension in _SEC_PRIMARY_DIMS and fallback:
         sec_fallback = [
             r for r in fallback
             if r.metadata.get("source_type", "").startswith("sec_")
@@ -813,7 +868,7 @@ async def rag_debug(
 
 @router.get("/debug/evidence/{ticker}")
 async def debug_evidence(ticker: str):
-    """Debug what cs2_client.get_evidence() returns — verify SEC chunks loading."""
+    """Debug what cs2_client.get_evidence() returns."""
     cs2 = CS2Client()
     evidence = cs2.get_evidence(ticker=ticker)
     from collections import Counter
@@ -845,13 +900,9 @@ async def chatbot_query(
     """
     Answer a question about a company using RAG.
 
-    Dimension detection pipeline (in order):
-    1. Caller-supplied dimension param → used directly (confidence=1.0)
-    2. Keyword scoring via _detect_dimension_scored() — fast, zero latency
-    3. LLM fallback via _detect_dimension_with_llm() — if keyword confidence
-       is below threshold OR returns None. Handles company-specific terms
-       (CUDA, Hopper, H100, DGX, Gemini, etc.) that keyword matching misses.
-    4. No dimension → ticker-only retrieval with raw query
+    FIX 1: await on all async LLM calls
+    FIX 2: broad questions return (None, 0.0) → no dimension lock
+    FIX 3: improved system prompt — strengths first, then gaps, always conclude
     """
     result = validate_ticker(ticker)
     if not result.passed:
@@ -878,11 +929,17 @@ async def chatbot_query(
     if not detected_dimension:
         detected_dimension, dim_confidence = _detect_dimension_scored(question)
 
-        # LLM fallback: keyword scoring returned no result or low-confidence result
-        # This handles company-specific terminology (CUDA, H100, DGX, Gemini, etc.)
-        # that doesn't appear in generic keyword lists
-        if detected_dimension is None or dim_confidence < _DIM_CONFIDENCE_THRESHOLD:
-            llm_dim, llm_conf = _detect_dimension_with_llm(question, llm_router)
+        # LLM fallback ONLY when keyword detector returned low confidence
+        # (not zero). A confidence of exactly 0.0 with None means the detector
+        # intentionally said "this is a broad question — don't lock to any
+        # dimension". We must NOT override that with LLM dimension detection,
+        # or broad questions get funneled into a single dimension's evidence.
+        keyword_intentionally_broad = (detected_dimension is None and dim_confidence == 0.0)
+
+        if not keyword_intentionally_broad and (
+            detected_dimension is None or dim_confidence < _DIM_CONFIDENCE_THRESHOLD
+        ):
+            llm_dim, llm_conf = await _detect_dimension_with_llm(question, llm_router)
             if llm_dim is not None:
                 detected_dimension = llm_dim
                 dim_confidence = llm_conf
@@ -923,6 +980,7 @@ async def chatbot_query(
             "dim_confidence": dim_confidence,
         }
 
+    # ── Build context with score enrichment ──────────────────────────────────
     results_sorted = sorted(results, key=lambda r: r.score, reverse=True)
     context_parts = []
     for r in results_sorted[:6]:
@@ -942,34 +1000,100 @@ async def chatbot_query(
     if len(context) > MAX_CONTEXT_CHARS:
         context = context[:MAX_CONTEXT_CHARS] + "\n\n[Context truncated to fit token budget.]"
 
+    # ── Enrich context with structured score data ─────────────────────────────
+    # Direct Snowflake/S3 calls — NO HTTP self-requests (avoids deadlock)
+    score_context = ""
+    try:
+        # Dimension scores from evidence_dimension_scores table
+        from app.repositories.scoring_repository import get_scoring_repository
+        scoring_repo = get_scoring_repository()
+        dim_rows = scoring_repo.get_dimension_scores(ticker)
+        if dim_rows:
+            score_lines = [
+                f"  {d['dimension'].replace('_',' ').title()}: {float(d['score']):.1f}/100"
+                for d in dim_rows if d.get("dimension") and d.get("score") is not None
+            ]
+            if score_lines:
+                score_context += "\nDIMENSION SCORES:\n" + "\n".join(score_lines)
+    except Exception as e:
+        logger.warning("rag.score_enrich_dims_failed", error=str(e))
+
+    try:
+        # Signal summary from company_signal_summaries table
+        from app.repositories.signal_repository import get_signal_repository
+        sig_repo = get_signal_repository()
+        summary = sig_repo.get_summary_by_ticker(ticker)
+        if summary:
+            sig_lines = []
+            for k, v in summary.items():
+                if k.endswith("_score") and v is not None and "composite" not in k:
+                    label = k.replace("_score", "").replace("_", " ").title()
+                    sig_lines.append(f"  {label}: {v}/100")
+            composite = summary.get("composite_score")
+            if composite:
+                sig_lines.insert(0, f"  Composite: {composite}/100")
+            if sig_lines:
+                score_context += "\nSIGNAL SCORES:\n" + "\n".join(sig_lines)
+    except Exception as e:
+        logger.warning("rag.score_enrich_signals_failed", error=str(e))
+
+    try:
+        # Culture from S3
+        from app.services.culture_signal_service import get_culture_signal_service
+        cult_svc = get_culture_signal_service()
+        cult_data, _ = cult_svc.get(ticker)
+        if cult_data and cult_data.get("overall_score"):
+            score_context += (
+                f"\nCULTURE ({cult_data.get('review_count', 0)} reviews): "
+                f"Overall={cult_data['overall_score']}/100, "
+                f"Innovation={cult_data.get('innovation_score', 'N/A')}, "
+                f"AI Awareness={cult_data.get('ai_awareness_score', 'N/A')}, "
+                f"Change Readiness={cult_data.get('change_readiness_score', 'N/A')}"
+            )
+    except Exception as e:
+        logger.warning("rag.score_enrich_culture_failed", error=str(e))
+
     dim_instruction = ""
     if detected_dimension and dim_confidence >= _DIM_CONFIDENCE_THRESHOLD:
         dim_label = detected_dimension.replace("_", " ").title()
         dim_instruction = f" Focus your answer on the {dim_label} dimension of AI readiness."
 
+    score_section = f"Structured scores:\n{score_context}\n\n" if score_context else ""
+
     messages = [
         {
             "role": "system",
-            "content": CHATBOT_SYSTEM + dim_instruction,
+            "content": CHATBOT_SYSTEM.format(dim_instruction=dim_instruction),
         },
         {
             "role": "user",
             "content": CHATBOT_USER.format(
                 ticker=ticker,
                 context=context,
+                score_section=score_section,
                 question=question,
             ),
         },
     ]
 
     try:
-        raw_answer = llm_router.complete("chat_response", messages)
+        # Use chat_response task — routes to Claude Haiku (cheapest Anthropic model)
+        # Haiku is ~$0.25/MTok input, $1.25/MTok output vs Sonnet at $3/$15
+        # With $5 budget, Haiku gives ~4000 chatbot answers vs ~300 with Sonnet
+        raw_answer = await llm_router.complete("chat_response", messages)
         if isinstance(raw_answer, str):
             answer = raw_answer
         elif hasattr(raw_answer, "choices"):
             answer = raw_answer.choices[0].message.content
         else:
             answer = str(raw_answer)
+
+        # Safety check
+        if not answer or not answer.strip() or answer.startswith("<coroutine"):
+            answer = (
+                f"Evidence was retrieved for {ticker} but the model response "
+                "could not be parsed. Please try again."
+            )
     except Exception as e:
         logger.error("rag.chatbot_llm_error", ticker=ticker, error=str(e))
         answer = f"Evidence retrieved but could not generate answer: {e}"

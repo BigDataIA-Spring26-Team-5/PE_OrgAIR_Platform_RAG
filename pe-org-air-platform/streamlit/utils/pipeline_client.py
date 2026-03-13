@@ -19,6 +19,20 @@ Steps 6+7 run BEFORE Step 8 so Glassdoor/board S3 files exist when CS3 reads the
 WEBSITE FIX: resolved.website is now threaded through to the digital_presence
 signal endpoint so BuiltWith/Wappalyzer use the real yfinance-resolved domain
 instead of a hardcoded or derived fallback.
+
+BUG FIXES (v2):
+  - BUG #1 FIXED: _step_parse skip condition used raw_count==0 which is ALWAYS
+    true after collection (docs move to parsed/chunked status). Now skips only
+    when parsed+chunked >= total.
+  - BUG #2 FIXED: _step_chunk Re-run button silently skipped because chunked>0
+    and parsed==0 and raw==0 was always true for already-chunked companies.
+    Added force=True param; _run_single_step passes force=True when re-running.
+  - BUG #3 FIXED: _get_doc_status used data.get("document_summary", data) which
+    fell back to the entire response dict when document_summary was absent,
+    causing field lookups to silently return 0.
+  - BUG #4 FIXED: _get_completed_steps hit /evidence endpoint 3 separate times
+    (steps 4, 5, 6) causing 9 redundant Snowflake connections per page render.
+    Now fetched once and reused.
 """
 from __future__ import annotations
 
@@ -181,6 +195,12 @@ class PipelineClient:
         """
         Query how many documents are raw / parsed / chunked for this ticker.
         Falls back to all-zeros on any error so the caller always gets a dict.
+
+        BUG #3 FIX: Previously used data.get("document_summary", data) which
+        fell back to the entire response dict when the key was absent. This caused
+        all field lookups (total_documents, by_status, etc.) to silently return 0,
+        making skip conditions unreliable. Now extracts document_summary safely
+        and falls back to top-level fields explicitly.
         """
         empty = {
             "total_documents": 0, "parsed_count": 0,
@@ -195,14 +215,24 @@ class PipelineClient:
             if resp.status_code != 200:
                 return empty
 
-            data    = resp.json()
-            summary = data.get("document_summary", data)
-            total   = int(summary.get("total_documents", 0))
+            data = resp.json()
 
-            by_status = summary.get("by_status", {})
-            chunked   = int(by_status.get("chunked", 0))
-            parsed    = int(by_status.get("parsed",  0))
-            raw = int(
+            # BUG #3 FIX: Don't fall back to the entire response dict.
+            # Extract document_summary safely; if absent, try top-level fields.
+            summary = data.get("document_summary") or {}
+
+            total = int(
+                summary.get("total_documents")
+                or data.get("total_documents")
+                or data.get("document_count")
+                or 0
+            )
+
+            by_status = summary.get("by_status") or data.get("by_status") or {}
+
+            chunked = int(by_status.get("chunked", 0))
+            parsed  = int(by_status.get("parsed", 0))
+            raw     = int(
                 by_status.get("raw", 0)
                 or by_status.get("collected", 0)
                 or by_status.get("pending", 0)
@@ -514,7 +544,7 @@ severity guide:
         company_name: str = "",
         on_substep: Optional[Callable[[str], None]] = None,
         skip_if_scored_today: bool = True,
-        website: Optional[str] = None,   # ← yfinance-resolved domain for digital_presence
+        website: Optional[str] = None,
     ) -> PipelineStepResult:
         """
         Selective per-signal scoring with LLM sanity check.
@@ -525,8 +555,11 @@ severity guide:
           not scored today            →  re-run
 
         website is passed as a query param to the digital_presence endpoint so
-        BuiltWith/Wappalyzer scan the correct domain (e.g. alphabet.com for GOOGL)
-        and Groq subdomain discovery gets the right context.
+        BuiltWith/Wappalyzer scan the correct domain (e.g. alphabet.com for GOOGL).
+
+        NOTE: on_substep is always None when called from the concurrent block in
+        run_pipeline — Streamlit UI cannot be called from background threads.
+        Sub-step progress during full pipeline runs is a known UX limitation.
         """
         start = time.time()
 
@@ -569,8 +602,6 @@ severity guide:
             s = requests.Session()
             s.headers.update({"Content-Type": "application/json"})
             try:
-                # Pass website to digital_presence endpoint so the backend can
-                # forward it to TechStackCollector.analyze_company(website=...)
                 params = {}
                 if cat == "digital_presence" and website:
                     params["website"] = website
@@ -651,21 +682,32 @@ severity guide:
 
     # ── Step 3 — Parse Documents (NON-FATAL) ──────────────────────────────────
 
-    def _step_parse(self, ticker: str, doc_status: Optional[Dict] = None) -> PipelineStepResult:
+    def _step_parse(self, ticker: str, doc_status: Optional[Dict] = None, force: bool = False) -> PipelineStepResult:
+        """
+        BUG #1 FIX: The original skip condition was `if total > 0 and raw == 0`.
+        raw_count is ALWAYS 0 after collection because documents immediately
+        transition from "raw" → "parsed" or "chunked" status in Snowflake.
+        This meant parse was permanently skipped on every re-run.
+
+        Fix: skip only when parsed+chunked >= total (all docs genuinely processed).
+        Also added force=True to bypass skip when user explicitly clicks Re-run.
+        """
         start = time.time()
 
-        if doc_status:
+        if doc_status and not force:
             total   = doc_status.get("total_documents", 0)
-            raw     = doc_status.get("raw_count", 0)
             parsed  = doc_status.get("parsed_count", 0)
             chunked = doc_status.get("chunked_count", 0)
-            if total > 0 and raw == 0:
-                already_done = parsed + chunked
+            already_done = parsed + chunked
+            # Skip only when ALL documents have already been parsed or chunked.
+            # Do NOT use raw_count==0 — it is always 0 after collection.
+            if total > 0 and already_done >= total:
                 return PipelineStepResult(
                     step=3, name="Parse Documents", status="skipped",
-                    message=f"All {already_done} documents already parsed or chunked — skipping",
+                    message=f"All {already_done} of {total} documents already parsed or chunked — skipping",
                     data=doc_status, duration_seconds=time.time() - start,
                 )
+
         try:
             resp = self._session.post(
                 f"{self.base_url}/api/v1/documents/parse/{ticker}",
@@ -701,20 +743,32 @@ severity guide:
 
     # ── Step 4 — Chunk Documents (NON-FATAL) ──────────────────────────────────
 
-    def _step_chunk(self, ticker: str, doc_status: Optional[Dict] = None) -> PipelineStepResult:
+    def _step_chunk(self, ticker: str, doc_status: Optional[Dict] = None, force: bool = False) -> PipelineStepResult:
+        """
+        BUG #2 FIX: The Re-run button in the UI silently skipped chunking because
+        the skip condition `chunked > 0 and parsed == 0 and raw == 0` is always
+        true for a company whose docs were previously chunked — regardless of
+        whether the user explicitly wants to re-chunk.
+
+        Fix: added force=True param. When force=True, skip logic is bypassed
+        entirely. _run_single_step passes force=True when the step was already done.
+        For full pipeline runs (force=False), skip is still applied correctly.
+        """
         start = time.time()
 
-        if doc_status:
+        if doc_status and not force:
             total   = doc_status.get("total_documents", 0)
             chunked = doc_status.get("chunked_count", 0)
             parsed  = doc_status.get("parsed_count", 0)
             raw     = doc_status.get("raw_count", 0)
-            if total > 0 and chunked > 0 and parsed == 0 and raw == 0:
+            # Skip only when all docs are chunked AND none remain in parsed/raw state.
+            if total > 0 and chunked >= total and parsed == 0 and raw == 0:
                 return PipelineStepResult(
                     step=4, name="Chunk Documents", status="skipped",
-                    message=f"All {chunked} documents already chunked — skipping",
+                    message=f"All {chunked} of {total} documents already chunked — skipping",
                     data=doc_status, duration_seconds=time.time() - start,
                 )
+
         try:
             resp = self._session.post(
                 f"{self.base_url}/api/v1/documents/chunk/{ticker}",
@@ -886,7 +940,6 @@ severity guide:
         force_rescore: bool = False,
     ) -> PipelineResult:
         ticker = resolved.ticker
-        # Extract website from resolved company (yfinance provides this)
         website: Optional[str] = getattr(resolved, "website", None)
         company_name: str = getattr(resolved, "name", ticker)
 
@@ -925,16 +978,20 @@ severity guide:
             return self._build_result(ticker, steps)
 
         # Step 3 — Parse Documents (NON-FATAL)
+        # Fetch fresh doc status AFTER collection for accurate counts.
+        # force=False: skip if already parsed (correct for full pipeline runs).
         if on_step_start: on_step_start("Parse Documents")
         doc_status_pre = self._get_doc_status(ticker)
-        s3 = run_step(lambda: self._step_parse(ticker, doc_status=doc_status_pre))
+        s3 = run_step(lambda: self._step_parse(ticker, doc_status=doc_status_pre, force=False))
         if s3.status == "error":
             logger.warning("[%s] Parse failed — continuing.", ticker)
 
         # Step 4 — Chunk Documents (NON-FATAL)
+        # Fetch fresh doc status AFTER parse for accurate parsed_count.
+        # force=False: skip if already chunked (correct for full pipeline runs).
         if on_step_start: on_step_start("Chunk Documents")
         doc_status_post_parse = self._get_doc_status(ticker)
-        s4 = run_step(lambda: self._step_chunk(ticker, doc_status=doc_status_post_parse))
+        s4 = run_step(lambda: self._step_chunk(ticker, doc_status=doc_status_post_parse, force=False))
         if s4.status == "error":
             logger.warning("[%s] Chunk failed — continuing.", ticker)
 
@@ -956,7 +1013,7 @@ severity guide:
                 company_name=company_name,
                 on_substep=None,   # Cannot call Streamlit UI from background thread
                 skip_if_scored_today=not force_rescore,
-                website=website,   # ← pass yfinance-resolved domain
+                website=website,
             )
 
         def _run_glassdoor():

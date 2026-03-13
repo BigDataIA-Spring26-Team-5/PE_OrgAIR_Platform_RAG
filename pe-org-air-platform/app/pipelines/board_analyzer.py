@@ -6,12 +6,14 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+from multiprocessing import context
+from multiprocessing import context
 import re
 import time
 from dataclasses import dataclass, field
 from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 
@@ -1226,6 +1228,20 @@ class BoardCompositionAnalyzer:
         self.s3 = s3
         self.doc_repo = doc_repo
         self._last_evidence_trail: Dict[str, dict] = {}
+        self._extraction_context = None
+
+    def set_extraction_context(self, context: Dict[str, Any]) -> None:
+            """Set LLM-extracted governance context."""
+            self._extraction_context = context
+            logger.info(f"  ✅ Set extraction context: {len(context.get('directors', []))} directors")
+        
+    def get_extraction_context(self) -> Optional[Dict[str, Any]]:
+            """Return current extraction context if set."""
+            return self._extraction_context
+        
+    def clear_extraction_context(self) -> None:
+            """Clear extraction context after analysis."""
+            self._extraction_context = None
 
     # def analyze_board(self, company_id: str, ticker: str, members: List[BoardMember], committees: List[str], strategy_text: str = "") -> GovernanceSignal:
     def analyze_board(self, company_id: str, ticker: str, members: List[BoardMember], committees: List[str], strategy_text: str = "", full_proxy_text: str = "") -> GovernanceSignal:
@@ -1294,16 +1310,49 @@ class BoardCompositionAnalyzer:
             score += D("15")
         trail["data_officer"] = {"points": 15 if has_officer else 0, "max_points": 15, "triggered": has_officer}
 
+       # NEW CODE - Uses LLM context if available:
         indep_ratio = D("0")
         indep_names, non_indep = [], []
-        if members:
-            for m in members:
-                (indep_names if m.is_independent else non_indep).append(m.name)
-            indep_ratio = (D(str(len(indep_names))) / D(str(len(members)))).quantize(D("0.0001"), rounding=ROUND_HALF_UP)
+
+        # Check if LLM extracted better independence data
+        llm_context = self.get_extraction_context()
+        if llm_context and llm_context.get("board_size", 0) > 0:
+            # Use LLM-extracted independence data
+            llm_indep_count = llm_context.get("independent_count", 0)
+            llm_board_size = llm_context.get("board_size", 0)
+            llm_indep_ratio = D(str(llm_indep_count)) / D(str(llm_board_size))
+            
+            logger.info(f"[{ticker}]   🤖 LLM independence: {llm_indep_count}/{llm_board_size} = {llm_indep_ratio:.2%}")
+            
+            # If LLM found directors, prefer its independence data
+            if llm_board_size >= len(members):
+                indep_ratio = llm_indep_ratio.quantize(D("0.0001"), rounding=ROUND_HALF_UP)
+                logger.info(f"[{ticker}]   ✅ Using LLM independence ratio")
+            else:
+                # LLM found fewer directors than regex, use regex
+                if members:
+                    for m in members:
+                        (indep_names if m.is_independent else non_indep).append(m.name)
+                    indep_ratio = (D(str(len(indep_names))) / D(str(len(members)))).quantize(D("0.0001"), rounding=ROUND_HALF_UP)
+        else:
+            # No LLM context, use regex extraction
+            if members:
+                for m in members:
+                    (indep_names if m.is_independent else non_indep).append(m.name)
+                indep_ratio = (D(str(len(indep_names))) / D(str(len(members)))).quantize(D("0.0001"), rounding=ROUND_HALF_UP)
+
         ratio_pass = indep_ratio > D("0.5")
         if ratio_pass:
             score += D("10")
-        trail["independent_ratio"] = {"points": 10 if ratio_pass else 0, "max_points": 10, "triggered": ratio_pass, "ratio": float(indep_ratio), "independent_count": len(indep_names), "total_directors": len(members)}
+        trail["independent_ratio"] = {
+            "points": 10 if ratio_pass else 0,
+            "max_points": 10,
+            "triggered": ratio_pass,
+            "ratio": float(indep_ratio),
+            "independent_count": llm_context.get("independent_count", len(indep_names)) if llm_context else len(indep_names),
+            "total_directors": llm_context.get("board_size", len(members)) if llm_context else len(members),
+        }
+        # trail["independent_ratio"] = {"points": 10 if ratio_pass else 0, "max_points": 10, "triggered": ratio_pass, "ratio": float(indep_ratio), "independent_count": len(indep_names), "total_directors": len(members)}
 
         has_risk_tech = False
         for c in committees:

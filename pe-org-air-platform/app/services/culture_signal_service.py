@@ -5,6 +5,9 @@ app/services/culture_signal_service.py
 Encapsulates Glassdoor/Indeed/CareerBliss collection, S3 persistence, and
 Snowflake upsert so the router only validates input, calls this service, and
 formats the response.
+
+FIX: Now also persists culture signal to external_signals table in Snowflake
+     (same pattern as BoardGovernanceService) so the evidence endpoint picks it up.
 """
 from __future__ import annotations
 
@@ -12,10 +15,13 @@ import asyncio
 import json
 import logging
 from dataclasses import dataclass, asdict
+from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Dict, List, Optional
 
 from app.repositories.scoring_repository import get_scoring_repository
+from app.repositories.signal_repository import get_signal_repository
+from app.repositories.company_repository import CompanyRepository
 from app.services.s3_storage import get_s3_service
 from app.services.utils import make_singleton_factory
 
@@ -40,6 +46,8 @@ class CultureSignalService:
     def __init__(self):
         self.s3 = get_s3_service()
         self.scoring_repo = get_scoring_repository()
+        self.signal_repo = get_signal_repository()
+        self.company_repo = CompanyRepository()
         # CultureCollector is NOT stored as an instance attribute — it manages a
         # Playwright browser lifecycle and must be created fresh per collect() call.
 
@@ -53,8 +61,9 @@ class CultureSignalService:
           1. Scrape reviews from Glassdoor, Indeed, and CareerBliss
           2. Produce a CultureSignal with scored dimensions
           3. Upsert the result into Snowflake signal_dimension_mapping
-          4. Load the raw and output files just written to S3
-          5. Return a CultureCollectResult with all data needed by the router
+          4. Persist to external_signals table (so evidence endpoint picks it up)
+          5. Load the raw and output files just written to S3
+          6. Return a CultureCollectResult with all data needed by the router
         """
         from app.pipelines.glassdoor_collector import CultureCollector
 
@@ -79,8 +88,38 @@ class CultureSignalService:
         for k, v in asdict(signal).items():
             signal_dict[k] = float(v) if isinstance(v, Decimal) else v
 
-        # Upsert to Snowflake (non-fatal)
+        # Upsert to Snowflake scoring dimension mapping (non-fatal)
         sf_ok = self.scoring_repo.upsert_culture_mapping(ticker, signal_dict)
+
+        # Also persist to external_signals table so evidence endpoint picks it up
+        # (mirrors what BoardGovernanceService does for board_governance)
+        try:
+            company_id = self._resolve_company_id(ticker)
+            overall_score = float(signal_dict.get("overall_score", 0))
+            confidence = float(signal_dict.get("confidence", 0.8))
+
+            self.signal_repo.create_signal(
+                company_id=company_id,
+                category="culture",
+                source="glassdoor_indeed_careerbliss",
+                signal_date=datetime.now(timezone.utc),
+                raw_value=f"Culture analysis: {signal_dict.get('review_count', 0)} reviews, score={overall_score:.1f}",
+                normalized_score=overall_score,
+                confidence=confidence,
+                metadata={
+                    "ticker": ticker,
+                    "innovation_score": signal_dict.get("innovation_score"),
+                    "data_driven_score": signal_dict.get("data_driven_score"),
+                    "ai_awareness_score": signal_dict.get("ai_awareness_score"),
+                    "change_readiness_score": signal_dict.get("change_readiness_score"),
+                    "review_count": signal_dict.get("review_count"),
+                    "avg_rating": signal_dict.get("avg_rating"),
+                    "source_breakdown": signal_dict.get("source_breakdown"),
+                },
+            )
+            logger.info(f"  💾 Signal saved: culture | Score: {overall_score}")
+        except Exception as exc:
+            logger.warning(f"[{ticker}] Culture signal Snowflake persist failed: {exc}")
 
         # Load the raw reviews that were just uploaded to S3
         raw_data, raw_key = self._load_s3_json(f"glassdoor_signals/raw/{ticker}/")
@@ -121,6 +160,16 @@ class CultureSignalService:
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
+
+    def _resolve_company_id(self, ticker: str) -> str:
+        """Resolve ticker to Snowflake company_id."""
+        try:
+            company = self.company_repo.get_by_ticker(ticker)
+            if company:
+                return company["id"]
+        except Exception:
+            pass
+        return ticker
 
     def _load_s3_json(
         self,
