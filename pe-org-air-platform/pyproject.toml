@@ -38,7 +38,8 @@ dependencies = [
     "streamlit (>=1.55.0,<2.0.0)",
     "chromadb (==0.5.23)",
     "onnxruntime (==1.16.3)",
-    "litellm (>=1.82.1,<2.0.0)"
+    "litellm (>=1.82.1,<2.0.0)",
+    "snowflake-sqlalchemy (>=1.9.0,<2.0.0)"
 ]
 
 [tool.poetry]
