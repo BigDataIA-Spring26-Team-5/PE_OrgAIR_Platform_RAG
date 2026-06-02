@@ -329,7 +329,8 @@ async def health_env_check():
         "variables": {
             "SNOWFLAKE_ACCOUNT": "✅ Set" if os.getenv("SNOWFLAKE_ACCOUNT") else "❌ Missing",
             "SNOWFLAKE_USER": "✅ Set" if os.getenv("SNOWFLAKE_USER") else "❌ Missing",
-            "SNOWFLAKE_PASSWORD": "✅ Set" if os.getenv("SNOWFLAKE_PASSWORD") else "❌ Missing",
+            "SNOWFLAKE_PRIVATE_KEY_PATH": "✅ Set" if os.getenv("SNOWFLAKE_PRIVATE_KEY_PATH") else "❌ Missing",
+            "SNOWFLAKE_PRIVATE_KEY_PASSPHRASE": "✅ Set" if os.getenv("SNOWFLAKE_PRIVATE_KEY_PASSPHRASE") else "⚪ Optional",
             "SNOWFLAKE_WAREHOUSE": "✅ Set" if os.getenv("SNOWFLAKE_WAREHOUSE") else "❌ Missing",
             "SNOWFLAKE_DATABASE": "✅ Set" if os.getenv("SNOWFLAKE_DATABASE") else "❌ Missing",
             "SNOWFLAKE_SCHEMA": "✅ Set" if os.getenv("SNOWFLAKE_SCHEMA") else "❌ Missing",

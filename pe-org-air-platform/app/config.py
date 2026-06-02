@@ -380,11 +380,12 @@ class Settings(BaseSettings):
     # Snowflake
     SNOWFLAKE_ACCOUNT: str
     SNOWFLAKE_USER: str
-    SNOWFLAKE_PASSWORD: SecretStr
-    SNOWFLAKE_DATABASE: str 
-    SNOWFLAKE_SCHEMA: str 
-    SNOWFLAKE_WAREHOUSE: str 
-    SNOWFLAKE_ROLE: str 
+    SNOWFLAKE_PRIVATE_KEY_PATH: str
+    SNOWFLAKE_PRIVATE_KEY_PASSPHRASE: Optional[SecretStr] = None
+    SNOWFLAKE_DATABASE: str
+    SNOWFLAKE_SCHEMA: str
+    SNOWFLAKE_WAREHOUSE: str
+    SNOWFLAKE_ROLE: str
     
     # AWS S3
     AWS_ACCESS_KEY_ID: SecretStr

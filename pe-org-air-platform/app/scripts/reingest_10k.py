@@ -122,9 +122,25 @@ def reingest_company(ticker: str, dry_run: bool = False, years_back: int = 3):
         )
         bucket = settings.S3_BUCKET
 
+        import os as _os
+        from cryptography.hazmat.backends import default_backend as _default_backend
+        from cryptography.hazmat.primitives.serialization import (
+            Encoding as _Encoding, NoEncryption as _NoEncryption,
+            PrivateFormat as _PrivateFormat, load_pem_private_key as _load_pem,
+        )
+        _key_path = settings.SNOWFLAKE_PRIVATE_KEY_PATH
+        _raw_pass = getattr(settings, "SNOWFLAKE_PRIVATE_KEY_PASSPHRASE", None)
+        _passphrase = _secret(_raw_pass).encode() if _raw_pass else None
+        with open(_key_path, "rb") as _kf:
+            _p_key = _load_pem(_kf.read(), password=_passphrase, backend=_default_backend())
+        _pkb = _p_key.private_bytes(
+            encoding=_Encoding.DER,
+            format=_PrivateFormat.PKCS8,
+            encryption_algorithm=_NoEncryption(),
+        )
         conn = snowflake.connector.connect(
             user=settings.SNOWFLAKE_USER,
-            password=_secret(settings.SNOWFLAKE_PASSWORD),
+            private_key=_pkb,
             account=settings.SNOWFLAKE_ACCOUNT,
             warehouse=settings.SNOWFLAKE_WAREHOUSE,
             database=settings.SNOWFLAKE_DATABASE,

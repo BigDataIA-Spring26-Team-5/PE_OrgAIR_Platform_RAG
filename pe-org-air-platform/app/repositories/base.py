@@ -12,6 +12,13 @@ from typing import Any, Dict, Generator, List, Optional
 from uuid import UUID
 
 import snowflake.connector
+from cryptography.hazmat.backends import default_backend
+from cryptography.hazmat.primitives.serialization import (
+    Encoding,
+    NoEncryption,
+    PrivateFormat,
+    load_pem_private_key,
+)
 from dotenv import load_dotenv
 from snowflake.connector import DictCursor
 from snowflake.connector.errors import DatabaseError, InterfaceError, ProgrammingError
@@ -24,6 +31,21 @@ from app.core.exceptions import (
 )
 
 
+def _load_private_key_bytes() -> bytes:
+    key_path = os.getenv("SNOWFLAKE_PRIVATE_KEY_PATH")
+    if not key_path:
+        raise ValueError("SNOWFLAKE_PRIVATE_KEY_PATH not set")
+    raw_passphrase = os.getenv("SNOWFLAKE_PRIVATE_KEY_PASSPHRASE", "")
+    passphrase = raw_passphrase.encode() if raw_passphrase else None
+    with open(key_path, "rb") as f:
+        p_key = load_pem_private_key(f.read(), password=passphrase, backend=default_backend())
+    return p_key.private_bytes(
+        encoding=Encoding.DER,
+        format=PrivateFormat.PKCS8,
+        encryption_algorithm=NoEncryption(),
+    )
+
+
 def get_snowflake_connection() -> snowflake.connector.SnowflakeConnection:
     """
     Snowflake connection factory.
@@ -33,7 +55,7 @@ def get_snowflake_connection() -> snowflake.connector.SnowflakeConnection:
     return snowflake.connector.connect(
         account=os.getenv("SNOWFLAKE_ACCOUNT"),
         user=os.getenv("SNOWFLAKE_USER"),
-        password=os.getenv("SNOWFLAKE_PASSWORD"),
+        private_key=_load_private_key_bytes(),
         warehouse=os.getenv("SNOWFLAKE_WAREHOUSE"),
         database=os.getenv("SNOWFLAKE_DATABASE"),
         schema=os.getenv("SNOWFLAKE_SCHEMA"),
